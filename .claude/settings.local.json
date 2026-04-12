@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:github.com)",
+      "Bash(pip install:*)",
+      "Bash(.venv/Scripts/pip install:*)",
+      "Bash(.venv/Scripts/python -c ':*)",
+      "Bash(.venv/Scripts/python -m pytest tests/test_look_ahead.py -v --tb=short)",
+      "Bash(.venv/Scripts/python -m pytest tests/test_hmm.py tests/test_look_ahead.py -v --tb=short)",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/test_strategies.py -v)",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/test_hmm.py tests/test_look_ahead.py tests/test_strategies.py -v --tb=short)",
+      "Bash(.venv/Scripts/python.exe -c ':*)",
+      "Read(//c/Users/espac/.claude/projects/c--Users-espac-localrepo/c7864594-cc4e-4f84-84ed-598e4c4ff418/tool-results/**)",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/test_hmm.py tests/test_look_ahead.py tests/test_strategies.py -v --tb=short -q)",
+      "Bash(py -3.12 -c ':*)"
+    ]
+  }
+}

@@ -1,0 +1,581 @@
+"""
+backtester.py — Walk-forward allocation backtester.
+
+Implements a strict walk-forward methodology: for each fold the HMM is trained
+exclusively on the in-sample window and evaluated on the subsequent out-of-sample
+window.  No data from the test period is ever used during training.
+
+ALLOCATION MATH
+---------------
+    equity        = cash + sum(shares[s] * price[s])
+    target_shares = equity * target_weight / price          # fractional
+    delta         = target_shares - current_shares
+    fill_price    = price * (1 + sign(delta) * slippage_pct)
+    cash         -= delta * fill_price
+    shares        = target_shares
+
+Leverage > 1.0 drives cash negative (margin); equity is still correct.
+
+FILL DELAY
+----------
+Signals generated at the close of bar t are executed at the close of bar t+1
+using bar t+1 prices (+ slippage).  Target weights are stored at signal time;
+target *shares* are computed at execution time using the pre-trade equity.
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Tuple
+
+import numpy as np
+import pandas as pd
+
+from core.hmm_engine import HMMEngine
+from core.regime_strategies import StrategyOrchestrator
+from data.feature_engineering import FeatureEngineer
+
+logger = logging.getLogger(__name__)
+
+# ── Default configurations ─────────────────────────────────────────────────────
+
+_DEFAULT_HMM_CFG: Dict = dict(
+    n_candidates=[3, 4, 5],
+    n_init=5,
+    min_train_bars=120,
+    stability_bars=3,
+    flicker_window=20,
+    flicker_threshold=4,
+    min_confidence=0.55,
+)
+
+_DEFAULT_STRAT_CFG: Dict = {
+    "strategy": {
+        "low_vol_allocation": 0.95,
+        "mid_vol_allocation_trend": 0.95,
+        "mid_vol_allocation_no_trend": 0.60,
+        "high_vol_allocation": 0.60,
+        "low_vol_leverage": 1.25,
+        "uncertainty_size_mult": 0.50,
+        "rebalance_threshold": 0.10,
+    }
+}
+
+
+# ── OHLCV helper ───────────────────────────────────────────────────────────────
+
+def _ohlcv_from_close(close: pd.Series) -> pd.DataFrame:
+    """
+    Synthesise a plausible OHLCV DataFrame from a close-price series.
+
+    High/low are approximated via a 20-bar EWM of the absolute daily return
+    so ATR and ADX are non-trivial.  Volume is generated with log-normal
+    noise correlated with absolute daily returns to avoid zero variance
+    (which would make the volume z-score features produce NaN throughout).
+    """
+    pct = close.pct_change().abs().fillna(0.001)
+    avg_range_pct = pct.ewm(span=20, adjust=False).mean().fillna(0.01)
+    half_range = close * avg_range_pct * 0.5
+    low_floor = close * 0.001          # prevent negative lows
+
+    # Volume: 1M baseline scaled by log-normal noise + absolute-return spike
+    # Use a deterministic seed derived from the price series so results are
+    # reproducible while still giving non-constant volume.
+    seed = int(abs(close.sum()) * 1000) % (2 ** 31)
+    rng = np.random.default_rng(seed)
+    vol_noise = rng.lognormal(mean=0.0, sigma=0.4, size=len(close))
+    volume = pd.Series(
+        1_000_000.0 * vol_noise * (1.0 + pct.values * 20.0),
+        index=close.index,
+    )
+
+    return pd.DataFrame(
+        {
+            "open":   close.shift(1).bfill(),
+            "high":   close + half_range,
+            "low":    (close - half_range).clip(lower=low_floor),
+            "close":  close,
+            "volume": volume,
+        }
+    )
+
+
+# ── Data structures ────────────────────────────────────────────────────────────
+
+@dataclass
+class WindowResult:
+    """Results for a single walk-forward fold."""
+    fold_id: int
+    train_start: pd.Timestamp
+    train_end: pd.Timestamp
+    test_start: pd.Timestamp
+    test_end: pd.Timestamp
+    equity_curve: pd.Series        # portfolio value indexed by date
+    returns: pd.Series             # daily returns
+    regime_series: pd.Series       # regime label per bar
+    trades: List[Dict]             # list of trade records
+    n_hmm_states: int              # states selected by BIC
+
+
+@dataclass
+class BacktestResult:
+    """Aggregated results across all walk-forward folds."""
+    windows: List[WindowResult]
+    combined_equity: pd.Series     # spliced equity curve across all folds
+    combined_returns: pd.Series    # spliced returns
+    combined_regimes: pd.Series    # regime labels stitched together
+    initial_capital: float
+    final_equity: float
+    metadata: Dict = field(default_factory=dict)
+
+
+# ── Main class ─────────────────────────────────────────────────────────────────
+
+class WalkForwardBacktester:
+    """
+    Walk-forward allocation backtester.
+
+    Splits a long price history into rolling train/test folds, trains a fresh
+    HMM on each training window, and simulates bar-by-bar trading on the
+    corresponding test window.  Fold results are stitched into a continuous
+    out-of-sample equity curve.
+
+    Features are pre-computed on the full price history (rolling windows are
+    causal, so this is equivalent to computing them incrementally) and then
+    clean rows are sliced per fold.
+
+    Parameters
+    ----------
+    symbols :
+        Trading universe (must all be columns in the ``prices`` DataFrame).
+    initial_capital :
+        Starting portfolio equity in USD.
+    train_window :
+        Number of *clean* feature rows used for HMM training per fold (~252 = 1 year).
+    test_window :
+        Out-of-sample evaluation window in bars (~126 = 6 months).
+    step_size :
+        Bars to advance the IS window between consecutive folds.
+    slippage_pct :
+        One-way slippage fraction applied on every executed trade.
+    risk_free_rate :
+        Annualised risk-free rate for Sharpe calculation.
+    fill_delay :
+        Bars between signal generation and execution (default 1).
+    zscore_window :
+        Rolling window for feature z-score standardisation (default 60,
+        shorter than the live default of 252 to limit warmup consumption).
+    """
+
+    def __init__(
+        self,
+        symbols: List[str],
+        initial_capital: float = 100_000.0,
+        train_window: int = 252,
+        test_window: int = 126,
+        step_size: int = 126,
+        slippage_pct: float = 0.0005,
+        risk_free_rate: float = 0.045,
+        fill_delay: int = 1,
+        zscore_window: int = 60,
+    ) -> None:
+        self.symbols = symbols
+        self.initial_capital = initial_capital
+        self.train_window = train_window
+        self.test_window = test_window
+        self.step_size = step_size
+        self.slippage_pct = slippage_pct
+        self.risk_free_rate = risk_free_rate
+        self.fill_delay = fill_delay
+        self.zscore_window = zscore_window
+
+        self._results: Optional[BacktestResult] = None
+
+    # ── Public API ─────────────────────────────────────────────────────────────
+
+    def run(
+        self,
+        prices: pd.DataFrame,
+        hmm_config: Optional[Dict] = None,
+        strategy_config: Optional[Dict] = None,
+        risk_config: Optional[Dict] = None,
+    ) -> BacktestResult:
+        """
+        Execute the full walk-forward backtest.
+
+        Parameters
+        ----------
+        prices :
+            Wide-format close prices, shape (n_bars, n_symbols).
+            Index must be a DatetimeIndex sorted ascending.
+        hmm_config :
+            Overrides for HMMEngine constructor kwargs.
+        strategy_config :
+            Override strategy section; merged into the default strategy config.
+        risk_config :
+            Reserved for future use (risk manager not yet implemented).
+
+        Returns
+        -------
+        :class:`BacktestResult`
+        """
+        hmm_cfg = {**_DEFAULT_HMM_CFG, **(hmm_config or {})}
+        strat_cfg = _DEFAULT_STRAT_CFG.copy()
+        if strategy_config:
+            strat_cfg["strategy"] = {
+                **strat_cfg["strategy"],
+                **strategy_config.get("strategy", strategy_config),
+            }
+
+        # ── Select universe present in prices ─────────────────────────────────
+        syms = [s for s in self.symbols if s in prices.columns]
+        if not syms:
+            raise ValueError("None of the requested symbols are in the prices DataFrame.")
+
+        # ── Build synthetic OHLCV for every symbol ────────────────────────────
+        ohlcv: Dict[str, pd.DataFrame] = {s: _ohlcv_from_close(prices[s]) for s in syms}
+
+        # ── Compute features on the full price history (market symbol = first) ─
+        market_sym = syms[0]
+        fe = FeatureEngineer(zscore_window=self.zscore_window)
+        full_features_raw = fe.build_feature_matrix(ohlcv[market_sym], dropna=False)
+
+        # ── Identify clean rows (all features non-NaN) ────────────────────────
+        clean_mask = full_features_raw.notna().all(axis=1)
+        clean_features = full_features_raw[clean_mask]
+        n_clean = len(clean_features)
+
+        logger.info(
+            "Price history: %d bars  |  warmup consumed: %d bars  |  clean features: %d bars",
+            len(prices), len(prices) - n_clean, n_clean,
+        )
+
+        # ── Generate walk-forward window indices ──────────────────────────────
+        windows_idx = self._generate_windows(n_clean)
+        if not windows_idx:
+            raise ValueError(
+                f"Insufficient data for walk-forward backtest. "
+                f"Need at least {self.train_window + self.test_window} clean feature bars; "
+                f"got {n_clean}. Provide more price history or reduce train_window / test_window."
+            )
+
+        logger.info(
+            "Walk-forward: %d folds  |  IS=%d bars  |  OOS=%d bars  |  step=%d bars",
+            len(windows_idx), self.train_window, self.test_window, self.step_size,
+        )
+
+        # ── Run each fold ─────────────────────────────────────────────────────
+        equity = self.initial_capital
+        fold_results: List[WindowResult] = []
+
+        for fold_id, (is_s, is_e, oos_s, oos_e) in enumerate(windows_idx):
+            is_features = clean_features.iloc[is_s:is_e]
+            oos_features = clean_features.iloc[oos_s:oos_e]
+
+            min_train = hmm_cfg.get("min_train_bars", 120)
+            if len(is_features) < min_train:
+                logger.warning("Fold %d: only %d IS rows (need %d) — skipping.",
+                               fold_id, len(is_features), min_train)
+                continue
+
+            if len(oos_features) == 0:
+                logger.warning("Fold %d: empty OOS window — skipping.", fold_id)
+                continue
+
+            logger.info(
+                "Fold %d  IS=[%s, %s]  OOS=[%s, %s]  start_equity=$%.0f",
+                fold_id,
+                is_features.index[0].date(), is_features.index[-1].date(),
+                oos_features.index[0].date(), oos_features.index[-1].date(),
+                equity,
+            )
+
+            try:
+                wr = self._run_single_window(
+                    fold_id, prices, ohlcv, is_features, oos_features,
+                    equity, hmm_cfg, strat_cfg,
+                )
+            except Exception as exc:
+                logger.error("Fold %d failed: %s — skipping.", fold_id, exc, exc_info=True)
+                continue
+
+            fold_results.append(wr)
+            if len(wr.equity_curve) > 0:
+                equity = float(wr.equity_curve.iloc[-1])
+
+        if not fold_results:
+            raise RuntimeError("All folds failed — no BacktestResult produced.")
+
+        # ── Stitch equity curves ──────────────────────────────────────────────
+        combined_equity = self._stitch_equity_curves(fold_results)
+        combined_returns = pd.concat(
+            [w.returns for w in fold_results if len(w.returns) > 0]
+        ).sort_index()
+        combined_regimes = pd.concat(
+            [w.regime_series for w in fold_results if len(w.regime_series) > 0]
+        ).sort_index()
+        all_trades = [t for w in fold_results for t in w.trades]
+
+        result = BacktestResult(
+            windows=fold_results,
+            combined_equity=combined_equity,
+            combined_returns=combined_returns,
+            combined_regimes=combined_regimes,
+            initial_capital=self.initial_capital,
+            final_equity=float(combined_equity.iloc[-1]) if len(combined_equity) > 0
+                         else self.initial_capital,
+            metadata={
+                "n_folds": len(fold_results),
+                "symbols": syms,
+                "total_trades": len(all_trades),
+                "train_window": self.train_window,
+                "test_window": self.test_window,
+                "step_size": self.step_size,
+                "slippage_pct": self.slippage_pct,
+                "hmm_config": hmm_cfg,
+            },
+        )
+        self._results = result
+        return result
+
+    def get_results(self) -> Optional[BacktestResult]:
+        """Return the most recent backtest results, or None if not yet run."""
+        return self._results
+
+    # ── Window generation ──────────────────────────────────────────────────────
+
+    def _generate_windows(
+        self, n_clean: int
+    ) -> List[Tuple[int, int, int, int]]:
+        """
+        Generate ``(is_start, is_end, oos_start, oos_end)`` index tuples for
+        all walk-forward folds.
+
+        Windows are rolling: each fold's IS window is exactly ``train_window``
+        clean bars; OOS windows are non-overlapping.
+
+        Parameters
+        ----------
+        n_clean :
+            Number of clean (non-NaN) feature rows in the full history.
+
+        Returns
+        -------
+        List of (is_start, is_end, oos_start, oos_end) row indices into
+        the clean feature DataFrame.
+        """
+        windows = []
+        cursor = 0
+        while cursor + self.train_window + self.test_window <= n_clean:
+            is_start = cursor
+            is_end = cursor + self.train_window
+            oos_start = is_end
+            oos_end = min(oos_start + self.test_window, n_clean)
+            windows.append((is_start, is_end, oos_start, oos_end))
+            cursor += self.step_size
+        return windows
+
+    # ── Single-fold simulation ─────────────────────────────────────────────────
+
+    def _run_single_window(
+        self,
+        fold_id: int,
+        prices: pd.DataFrame,
+        ohlcv_by_symbol: Dict[str, pd.DataFrame],
+        is_features: pd.DataFrame,
+        oos_features: pd.DataFrame,
+        start_equity: float,
+        hmm_cfg: Dict,
+        strat_cfg: Dict,
+    ) -> WindowResult:
+        """
+        Execute one walk-forward fold.
+
+        1. Trains a fresh HMMEngine on ``is_features``.
+        2. Warms up the incremental forward pass on IS bars (so the alpha
+           cache is initialised at OOS start — no cold restart).
+        3. Simulates bar-by-bar trading on ``oos_features`` with fill delay.
+
+        Returns
+        -------
+        :class:`WindowResult`
+        """
+        # ── 1. Train HMM ──────────────────────────────────────────────────────
+        engine = HMMEngine(**{k: v for k, v in hmm_cfg.items()})
+        engine.fit(is_features.values)
+        logger.info("Fold %d: HMM fitted  n_states=%d  BIC=%.2f",
+                    fold_id, engine._n_states, engine._training_bic)
+
+        # ── 2. Build orchestrator from fitted regime_infos ─────────────────
+        regime_infos = engine.get_all_regime_info()
+        rebalance_thr = strat_cfg.get("strategy", {}).get("rebalance_threshold", 0.10)
+        min_conf = hmm_cfg.get("min_confidence", 0.55)
+        orch = StrategyOrchestrator(
+            config=strat_cfg,
+            regime_infos=regime_infos,
+            min_confidence=min_conf,
+            rebalance_threshold=rebalance_thr,
+        )
+
+        # ── 3. Warm up the forward pass on IS bars ────────────────────────────
+        for t in range(len(is_features)):
+            engine.update(is_features.values[t])
+
+        # ── 4. Initialise portfolio state ─────────────────────────────────────
+        cash: float = start_equity
+        shares: Dict[str, float] = {s: 0.0 for s in self.symbols}
+
+        equity_curve: Dict[pd.Timestamp, float] = {}
+        returns_dict: Dict[pd.Timestamp, float] = {}
+        regime_dict: Dict[pd.Timestamp, str] = {}
+        trades: List[Dict] = []
+
+        prev_equity: float = start_equity
+        # pending stores target weights (not shares) for 1-bar fill delay
+        pending: Optional[Dict] = None
+
+        oos_timestamps = list(oos_features.index)
+
+        # ── 5. OOS bar-by-bar simulation ──────────────────────────────────────
+        for t, bar_date in enumerate(oos_timestamps):
+            if bar_date not in prices.index:
+                continue
+
+            # Current close prices for all symbols
+            cur_px: Dict[str, float] = {}
+            for s in self.symbols:
+                if s in prices.columns:
+                    val = prices.loc[bar_date, s]
+                    if pd.notna(val) and val > 0:
+                        cur_px[s] = float(val)
+
+            # ── 5a. Execute pending rebalance (fill-delay = 1 bar) ────────────
+            if pending is not None:
+                equity_pre = cash + sum(
+                    shares[s] * cur_px.get(s, 0.0) for s in self.symbols
+                )
+                for sym, target_wt in pending["weights"].items():
+                    price = cur_px.get(sym)
+                    if not price:
+                        continue
+                    target_shr = equity_pre * target_wt / price
+                    delta = target_shr - shares.get(sym, 0.0)
+                    if abs(delta * price) < 1.0:    # ignore sub-$1 moves
+                        continue
+                    sign = 1.0 if delta > 0 else -1.0
+                    fill_px = price * (1.0 + sign * self.slippage_pct)
+                    cash -= delta * fill_px
+                    shares[sym] = target_shr
+                    trades.append({
+                        "fold": fold_id,
+                        "timestamp": bar_date,
+                        "symbol": sym,
+                        "delta_shares": delta,
+                        "fill_price": fill_px,
+                        "trade_value": abs(delta * fill_px),
+                        "slippage_cost": abs(delta * fill_px * self.slippage_pct),
+                        "regime": pending["regime"],
+                        "regime_prob": pending["regime_prob"],
+                        "target_weight": target_wt,
+                    })
+
+                # Sync orchestrator with post-execution actual weights
+                equity_post = cash + sum(
+                    shares[s] * cur_px.get(s, 0.0) for s in self.symbols
+                )
+                if equity_post > 0:
+                    actual_wts = {
+                        s: (shares[s] * cur_px.get(s, 0.0)) / equity_post
+                        for s in self.symbols
+                    }
+                    orch.update_weights(actual_wts)
+                pending = None
+
+            # ── 5b. Mark to market ────────────────────────────────────────────
+            equity = cash + sum(
+                shares[s] * cur_px.get(s, 0.0) for s in self.symbols
+            )
+            equity_curve[bar_date] = equity
+            returns_dict[bar_date] = (
+                (equity / prev_equity - 1.0) if prev_equity > 0 else 0.0
+            )
+            prev_equity = equity
+
+            # ── 5c. Update HMM (incremental forward pass) ─────────────────────
+            regime_state = engine.update(oos_features.values[t], bar_date)
+            is_flickering = engine.is_flickering()
+            regime_dict[bar_date] = regime_state.label
+
+            # ── 5d. Build per-symbol OHLCV windows for signal generation ──────
+            bars_for_signal: Dict[str, pd.DataFrame] = {}
+            for s in self.symbols:
+                if s not in ohlcv_by_symbol:
+                    continue
+                sym_ohlcv = ohlcv_by_symbol[s]
+                try:
+                    end_loc = sym_ohlcv.index.get_loc(bar_date) + 1
+                except KeyError:
+                    continue
+                # Last 250 bars (enough for EMA50 / ATR14 warmup)
+                bars_for_signal[s] = sym_ohlcv.iloc[max(0, end_loc - 250):end_loc]
+
+            # ── 5e. Generate signals ──────────────────────────────────────────
+            signals = orch.generate_signals(
+                self.symbols, bars_for_signal, regime_state, is_flickering
+            )
+
+            # ── 5f. Queue target weights for execution at next bar ────────────
+            if signals:
+                pending = {
+                    "weights": {
+                        sig.symbol: sig.position_size_pct * sig.leverage
+                        for sig in signals
+                    },
+                    "regime": regime_state.label,
+                    "regime_prob": regime_state.probability,
+                }
+
+        return WindowResult(
+            fold_id=fold_id,
+            train_start=is_features.index[0],
+            train_end=is_features.index[-1],
+            test_start=oos_features.index[0],
+            test_end=oos_features.index[-1],
+            equity_curve=pd.Series(equity_curve, name="equity"),
+            returns=pd.Series(returns_dict, name="returns"),
+            regime_series=pd.Series(regime_dict, name="regime"),
+            trades=trades,
+            n_hmm_states=engine._n_states,
+        )
+
+    # ── Stitching helpers ──────────────────────────────────────────────────────
+
+    def _stitch_equity_curves(self, windows: List[WindowResult]) -> pd.Series:
+        """
+        Concatenate per-fold equity curves into a single continuous series.
+
+        Because each fold's simulation starts at the previous fold's ending
+        equity, the curves are already continuous in dollar terms — no
+        re-scaling is required.
+        """
+        pieces = [w.equity_curve for w in windows if len(w.equity_curve) > 0]
+        if not pieces:
+            return pd.Series(dtype=float, name="equity")
+        return pd.concat(pieces).sort_index()
+
+    def _simulate_bar(
+        self,
+        bar_idx: int,
+        prices_history: pd.DataFrame,
+        features_history: np.ndarray,
+        current_weights: Dict[str, float],
+        equity: float,
+        signal_generator,
+    ) -> Tuple[Dict[str, float], float, Dict]:
+        """
+        Legacy stub — bar simulation is inlined in :meth:`_run_single_window`.
+        """
+        raise NotImplementedError(
+            "Use _run_single_window() instead of _simulate_bar()."
+        )

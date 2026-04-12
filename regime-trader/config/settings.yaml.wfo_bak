@@ -1,0 +1,156 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# regime-trader — master configuration
+# All tuneable parameters live here; code reads this at startup.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Asset groups ──────────────────────────────────────────────────────────────
+# Select with --asset-group <name> on any command.
+# The active group overrides broker.symbols at runtime.
+asset_groups:
+  stocks:                             # group1 — US large-cap equities (default)
+    - SPY
+    - QQQ
+    - AAPL
+    - MSFT
+    - AMZN
+    - GOOGL
+    - NVDA
+    - META
+    - TSLA
+    - AMD
+  crypto:                             # group2 — top cryptocurrencies (Alpaca crypto feed)
+    - "BTC/USD"
+    - "ETH/USD"
+    - "SOL/USD"
+    - "AVAX/USD"
+    - "DOGE/USD"
+    - "LTC/USD"
+    - "LINK/USD"
+    - "UNI/USD"
+  indices:                            # group3 — broad market ETFs (no single stocks)
+    - SPY                             # S&P 500
+    - QQQ                             # NASDAQ 100
+    - DIA                             # Dow Jones
+    - IWM                             # Russell 2000
+    - GLD                             # Gold
+    - TLT                             # 20yr Treasuries
+    - EFA                             # Developed markets ex-US
+    - EEM                             # Emerging markets
+    - VNQ                             # REITs
+    - USO                             # Oil
+
+# ── Broker / trading universe ─────────────────────────────────────────────────
+broker:
+  paper_trading: true                 # true = Alpaca paper endpoint
+  asset_group: "stocks"               # active group — overridden by --asset-group flag
+  symbols:                            # fallback if asset_group not found
+    - SPY
+    - QQQ
+    - AAPL
+    - MSFT
+    - AMZN
+    - GOOGL
+    - NVDA
+    - META
+    - TSLA
+    - AMD
+  timeframe: "5Min"                   # bar resolution (1Min, 5Min, 1Hour, 1Day)
+  base_url_paper: "https://paper-api.alpaca.markets"
+  base_url_live:  "https://api.alpaca.markets"
+  data_feed: "iex"                    # iex | sip
+
+# ── Hidden Markov Model (regime detection) ────────────────────────────────────
+hmm:
+  # Model selection: train separate HMMs for each candidate state count,
+  # pick the one with the lowest BIC.
+  n_candidates: [3, 4, 5, 6, 7]      # state counts to evaluate
+  n_init: 10                          # random restarts per candidate
+  covariance_type: "full"             # full | diag | spherical | tied
+
+  # Training data requirements
+  min_train_bars: 252                 # minimum bars before first fit (~1 year)
+
+  # Regime stability filters
+  stability_bars: 5                   # regime must persist N bars to be "confirmed"
+  flicker_window: 20                  # rolling window (bars) for flicker detection
+  flicker_threshold: 2                # max regime changes allowed in flicker_window
+  min_confidence: 0.70                # minimum posterior probability to act on regime
+
+  # Feature set fed to HMM (computed by FeatureEngineer)
+  features:
+    - "log_return"
+    - "realized_vol_5d"
+    - "realized_vol_21d"
+
+# ── Allocation strategies (vol-regime based) ──────────────────────────────────
+strategy:
+  # Fraction of portfolio equity to allocate per regime:
+  #   low_vol  : trending market, full deployment + optional leverage
+  #   mid_vol  : transition regime; allocation depends on trend signal
+  #   high_vol : risk-off, reduce exposure
+  low_vol_allocation: 0.95            # near-full deployment in low-vol regime
+  mid_vol_allocation_trend: 0.95      # mid-vol but trend is strong
+  mid_vol_allocation_no_trend: 0.60   # mid-vol, no clear trend
+  high_vol_allocation: 0.60           # defensive allocation in high-vol regime
+
+  # Leverage multiplier applied on top of allocation in low-vol regime only
+  low_vol_leverage: 1.25
+
+  # Rebalance tolerance: skip trade if weight deviation < threshold
+  rebalance_threshold: 0.15           # 15% relative deviation triggers rebalance
+
+  # Scale down position sizes when regime confidence is below min_confidence
+  uncertainty_size_mult: 0.50         # multiply target size by this factor
+
+  # Trend signal (used to distinguish mid-vol sub-regimes)
+  trend_lookback: 50                  # bars for simple moving-average trend filter
+  trend_min_slope: 0.0                # minimum normalised slope to call "trending"
+
+# ── Risk management ───────────────────────────────────────────────────────────
+risk:
+  # Per-trade / per-position limits
+  max_risk_per_trade: 0.01            # 1% of equity risked per individual trade
+  max_single_position: 0.15          # 15% max weight in any single symbol
+  max_concurrent: 5                   # max number of open positions at once
+  max_daily_trades: 20                # circuit breaker: halt after N trades/day
+
+  # Portfolio-level exposure
+  max_exposure: 0.80                  # gross exposure cap (sum of |weights|)
+  max_leverage: 1.25                  # hard leverage ceiling
+
+  # Drawdown-triggered risk reduction (daily)
+  daily_dd_reduce: 0.02               # reduce size 50% after 2% daily drawdown
+  daily_dd_halt:   0.03               # halt trading after 3% daily drawdown
+
+  # Drawdown-triggered risk reduction (weekly)
+  weekly_dd_reduce: 0.05              # reduce size 50% after 5% weekly drawdown
+  weekly_dd_halt:   0.07              # halt trading after 7% weekly drawdown
+
+  # Rolling peak-to-trough drawdown limit
+  max_dd_from_peak: 0.10              # halt & alert if portfolio drops 10% from peak
+
+# ── Backtesting ───────────────────────────────────────────────────────────────
+backtest:
+  initial_capital: 100000             # starting equity (USD)
+  slippage_pct: 0.0005                # 5 bps round-trip slippage per trade
+
+  # Walk-forward windows (in trading bars)
+  train_window: 252                   # in-sample training window (~1 year)
+  test_window: 126                    # out-of-sample test window (~6 months)
+  step_size: 126                      # how far to advance each fold (~6 months)
+
+  # Performance benchmarks
+  risk_free_rate: 0.045               # annualised risk-free rate for Sharpe
+  benchmark_symbol: "SPY"            # buy-and-hold comparison
+
+  # Commission model
+  commission_per_share: 0.0           # set >0 for per-share broker commission
+  min_commission: 0.0                 # minimum per-order commission
+
+# ── Monitoring ────────────────────────────────────────────────────────────────
+monitoring:
+  dashboard_refresh_seconds: 5        # terminal dashboard redraw interval
+  alert_rate_limit_minutes: 15        # minimum minutes between repeated alerts
+  log_level: "INFO"                   # DEBUG | INFO | WARNING | ERROR
+  log_dir: "logs/"
+  log_rotation_mb: 50                 # rotate log file at this size

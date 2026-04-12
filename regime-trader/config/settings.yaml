@@ -1,0 +1,106 @@
+asset_groups:
+  stocks:
+  - SPY
+  - QQQ
+  - AAPL
+  - MSFT
+  - AMZN
+  - GOOGL
+  - NVDA
+  - META
+  - TSLA
+  - AMD
+  crypto:
+  - BTC/USD
+  - ETH/USD
+  - SOL/USD
+  - AVAX/USD
+  - DOGE/USD
+  - LTC/USD
+  - LINK/USD
+  - UNI/USD
+  indices:
+  - SPY
+  - QQQ
+  - DIA
+  - IWM
+  - GLD
+  - TLT
+  - EFA
+  - EEM
+  - VNQ
+  - USO
+broker:
+  paper_trading: true
+  asset_group: stocks
+  symbols:
+  - SPY
+  - QQQ
+  - AAPL
+  - MSFT
+  - AMZN
+  - GOOGL
+  - NVDA
+  - META
+  - TSLA
+  - AMD
+  timeframe: 5Min
+  base_url_paper: https://paper-api.alpaca.markets
+  base_url_live: https://api.alpaca.markets
+  data_feed: iex
+hmm:
+  n_candidates:
+  - 3
+  - 4
+  - 5
+  - 6
+  - 7
+  n_init: 10
+  covariance_type: full
+  min_train_bars: 37
+  stability_bars: 5
+  flicker_window: 20
+  flicker_threshold: 2
+  min_confidence: 0.7
+  features:
+  - log_return
+  - realized_vol_5d
+  - realized_vol_21d
+strategy:
+  low_vol_allocation: 0.95
+  mid_vol_allocation_trend: 0.95
+  mid_vol_allocation_no_trend: 0.6
+  high_vol_allocation: 0.6
+  low_vol_leverage: 1.25
+  rebalance_threshold: 0.15
+  uncertainty_size_mult: 0.5
+  trend_lookback: 50
+  trend_min_slope: 0.0
+risk:
+  max_risk_per_trade: 0.01
+  max_single_position: 0.15
+  max_concurrent: 5
+  max_daily_trades: 20
+  max_exposure: 0.8
+  max_leverage: 1.25
+  daily_dd_reduce: 0.02
+  daily_dd_halt: 0.03
+  weekly_dd_reduce: 0.05
+  weekly_dd_halt: 0.07
+  max_dd_from_peak: 0.1
+backtest:
+  initial_capital: 100000
+  slippage_pct: 0.0005
+  train_window: 42
+  test_window: 21
+  step_size: 21
+  risk_free_rate: 0.045
+  benchmark_symbol: SPY
+  commission_per_share: 0.0
+  min_commission: 0.0
+monitoring:
+  dashboard_refresh_seconds: 5
+  alert_rate_limit_minutes: 15
+  log_level: INFO
+  log_dir: logs/
+  log_rotation_mb: 50

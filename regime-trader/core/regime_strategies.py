@@ -1,0 +1,799 @@
+"""
+regime_strategies.py — Volatility-regime allocation strategies.
+
+DESIGN
+------
+The HMM detects *volatility environments*, not price direction.  Equities
+trend upward ~70% of the time in low-volatility periods; the worst drawdowns
+cluster in high-volatility spikes.  The entire edge is drawdown avoidance:
+
+  Low vol  → be fully invested (calm markets trend up)
+  Mid vol  → stay invested if trend intact, reduce if not
+  High vol → reduce but stay LONG (catch V-shaped rebounds)
+
+ALWAYS LONG.  NEVER SHORT.
+
+THREE STRATEGIES (mapped from vol_rank, independent of label ordering)
+----------------------------------------------------------------------
+  LowVolBullStrategy       vol_rank ≤ 0.33  95% alloc, 1.25× leverage
+  MidVolCautiousStrategy   0.33 < rank < 0.67  60–95% depending on EMA trend
+  HighVolDefensiveStrategy vol_rank ≥ 0.67  60% alloc, 1.0× leverage
+
+VOLATILITY RANK (computed by StrategyOrchestrator at init time)
+---------------------------------------------------------------
+Sort RegimeInfo objects by expected_volatility ascending.
+  vol_rank = rank_idx / (n_regimes - 1)   # 0.0 = calmest, 1.0 = most volatile
+  vol_rank ≤ 0.33  → LowVolBullStrategy
+  vol_rank ≥ 0.67  → HighVolDefensiveStrategy
+  else             → MidVolCautiousStrategy
+
+This sort is INDEPENDENT of the label sort (which is by return).
+
+UNCERTAINTY MODE (confidence < threshold OR is_flickering)
+-----------------------------------------------------------
+  - Halve all position sizes
+  - Force leverage to 1.0×
+  - Signal.reasoning prefixed with "[UNCERTAINTY]"
+
+REBALANCING
+-----------
+  Skip rebalance when |target_weight − current_weight| < rebalance_threshold × target_weight.
+"""
+
+from __future__ import annotations
+
+import logging
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any, Dict, List, Optional, Type
+
+import pandas as pd
+
+from core.hmm_engine import RegimeInfo, RegimeState
+
+logger = logging.getLogger(__name__)
+
+
+# ── Enumerations ───────────────────────────────────────────────────────────────
+
+class Direction(str, Enum):
+    LONG = "LONG"
+    FLAT = "FLAT"   # close / do not enter the position
+
+
+# ── Signal dataclass ───────────────────────────────────────────────────────────
+
+@dataclass
+class Signal:
+    """
+    Fully-resolved trading signal for one symbol, ready for the order executor.
+
+    ``position_size_pct`` is the **per-symbol** target weight in the portfolio
+    (the orchestrator divides the strategy's total allocation by n_long_symbols).
+
+    Attributes
+    ----------
+    symbol            : ticker
+    direction         : LONG or FLAT
+    confidence        : regime posterior probability (0–1)
+    entry_price       : latest close price at signal time
+    stop_loss         : computed stop level (strategy-specific)
+    take_profit       : optional target price (None for open-ended holds)
+    position_size_pct : per-symbol target weight (0.0 – 1.0)
+    leverage          : 1.0 (no leverage) or 1.25 (low-vol only)
+    regime_id         : HMM state index that triggered this signal
+    regime_name       : human-readable label (e.g. "BULL")
+    regime_probability: same as confidence, stored separately for clarity
+    timestamp         : bar timestamp
+    reasoning         : human-readable explanation
+    strategy_name     : class name of the strategy that generated this signal
+    metadata          : arbitrary key-value data (EMA, ATR, etc.)
+    """
+
+    symbol: str
+    direction: Direction
+    confidence: float
+    entry_price: float
+    stop_loss: float
+    take_profit: Optional[float]
+    position_size_pct: float
+    leverage: float
+    regime_id: int
+    regime_name: str
+    regime_probability: float
+    timestamp: pd.Timestamp
+    reasoning: str
+    strategy_name: str
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def risk_per_trade(self) -> float:
+        """(entry − stop) / entry — fraction of entry price at risk."""
+        if self.entry_price <= 0.0:
+            return 0.0
+        return max(0.0, (self.entry_price - self.stop_loss) / self.entry_price)
+
+    @property
+    def is_long(self) -> bool:
+        return self.direction == Direction.LONG
+
+
+# ── Technical helpers (module-level, reused across strategies) ─────────────────
+
+def _ema(close: pd.Series, period: int) -> float:
+    """Latest EMA value using standard exponential smoothing."""
+    return float(close.ewm(span=period, adjust=False).mean().iloc[-1])
+
+
+def _atr(
+    high: pd.Series,
+    low: pd.Series,
+    close: pd.Series,
+    period: int = 14,
+) -> float:
+    """Latest ATR using Wilder's smoothing (com = period − 1)."""
+    prev_close = close.shift(1)
+    tr = pd.concat(
+        [
+            (high - low),
+            (high - prev_close).abs(),
+            (low - prev_close).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
+    return float(tr.ewm(com=period - 1, adjust=False).mean().iloc[-1])
+
+
+# ── Base strategy ABC ──────────────────────────────────────────────────────────
+
+class BaseStrategy(ABC):
+    """
+    Abstract base for all regime strategies.
+
+    Concrete strategies implement :meth:`generate_signal` and expose
+    :attr:`name` and :attr:`total_allocation`.
+    """
+
+    #: Minimum bars required to compute 50-EMA and 14-period ATR.
+    MIN_BARS: int = 60
+
+    @property
+    @abstractmethod
+    def name(self) -> str:
+        """Short identifier shown in Signal.strategy_name."""
+
+    @property
+    @abstractmethod
+    def total_allocation(self) -> float:
+        """
+        Total portfolio fraction this strategy deploys across all long symbols.
+
+        The orchestrator divides this by n_long_symbols to get per-symbol weights.
+        """
+
+    @abstractmethod
+    def generate_signal(
+        self,
+        symbol: str,
+        bars: pd.DataFrame,
+        regime_state: RegimeState,
+    ) -> Optional[Signal]:
+        """
+        Produce a :class:`Signal` for ``symbol``.
+
+        Parameters
+        ----------
+        symbol       : ticker string
+        bars         : OHLCV DataFrame, most-recent row last
+        regime_state : current regime from the HMM engine
+
+        Returns
+        -------
+        :class:`Signal`, or ``None`` when bars are insufficient.
+        """
+
+    def _has_enough_bars(self, bars: pd.DataFrame) -> bool:
+        required_cols = {"open", "high", "low", "close", "volume"}
+        return required_cols.issubset(bars.columns) and len(bars) >= self.MIN_BARS
+
+
+# ── Concrete strategies ────────────────────────────────────────────────────────
+
+class LowVolBullStrategy(BaseStrategy):
+    """
+    Low-volatility bull regime: full deployment with modest leverage.
+
+    Rationale: In calm markets equities drift upward; leverage amplifies
+    the compounding advantage while the wide ATR-based stop keeps risk bounded.
+
+    Allocation : ``allocation`` (default 0.95 — 95% of portfolio)
+    Leverage   : ``leverage``   (default 1.25×)
+    Stop       : max(price − 3×ATR, 50EMA − 0.5×ATR)
+
+    Parameters
+    ----------
+    allocation     : total portfolio fraction to deploy
+    leverage       : leverage multiplier (≥ 1.0)
+    ema_period     : EMA period for trend reference and stop calc
+    atr_period     : ATR period for stop calc
+    atr_stop_mult  : multiplier for price-based ATR stop  (default 3.0)
+    ema_stop_mult  : multiplier for EMA-based ATR stop    (default 0.5)
+    """
+
+    def __init__(
+        self,
+        allocation: float = 0.95,
+        leverage: float = 1.25,
+        ema_period: int = 50,
+        atr_period: int = 14,
+        atr_stop_mult: float = 3.0,
+        ema_stop_mult: float = 0.5,
+    ) -> None:
+        self._allocation = allocation
+        self._leverage = leverage
+        self.ema_period = ema_period
+        self.atr_period = atr_period
+        self.atr_stop_mult = atr_stop_mult
+        self.ema_stop_mult = ema_stop_mult
+
+    @property
+    def name(self) -> str:
+        return "LowVolBullStrategy"
+
+    @property
+    def total_allocation(self) -> float:
+        return self._allocation
+
+    def generate_signal(
+        self,
+        symbol: str,
+        bars: pd.DataFrame,
+        regime_state: RegimeState,
+    ) -> Optional[Signal]:
+        if not self._has_enough_bars(bars):
+            logger.debug("LowVolBull: %s has only %d bars (need %d)", symbol, len(bars), self.MIN_BARS)
+            return None
+
+        close = bars["close"]
+        high  = bars["high"]
+        low   = bars["low"]
+
+        price  = float(close.iloc[-1])
+        ema50  = _ema(close, self.ema_period)
+        atr_val = _atr(high, low, close, self.atr_period)
+
+        stop_price  = price  - self.atr_stop_mult * atr_val   # price − 3 ATR
+        stop_ema    = ema50  - self.ema_stop_mult * atr_val   # 50EMA − 0.5 ATR
+        stop_loss   = max(stop_price, stop_ema)               # tighter is safer
+
+        return Signal(
+            symbol=symbol,
+            direction=Direction.LONG,
+            confidence=regime_state.probability,
+            entry_price=price,
+            stop_loss=stop_loss,
+            take_profit=None,
+            position_size_pct=self._allocation,   # orchestrator divides by n_symbols
+            leverage=self._leverage,
+            regime_id=regime_state.state_id,
+            regime_name=regime_state.label,
+            regime_probability=regime_state.probability,
+            timestamp=pd.Timestamp(bars.index[-1]),
+            reasoning=(
+                f"LowVol regime — calm market, full deployment + {self._leverage}× leverage. "
+                f"EMA{self.ema_period}={ema50:.2f}  ATR={atr_val:.4f}  "
+                f"stop=max({stop_price:.2f}, {stop_ema:.2f})={stop_loss:.2f}"
+            ),
+            strategy_name=self.name,
+            metadata={
+                "ema50": round(ema50, 4),
+                "atr": round(atr_val, 4),
+                "stop_price_based": round(stop_price, 4),
+                "stop_ema_based": round(stop_ema, 4),
+            },
+        )
+
+
+class MidVolCautiousStrategy(BaseStrategy):
+    """
+    Mid-volatility regime: trend-conditional allocation.
+
+    Uses a 50-EMA filter to distinguish between:
+    * price > 50 EMA (trend intact)  → 95% allocation, 1.0× leverage
+    * price < 50 EMA (trend weak)    → 60% allocation, 1.0× leverage
+
+    Stop: 50EMA − 0.5×ATR
+
+    Parameters
+    ----------
+    allocation_above_ema : allocation when price > 50 EMA (default 0.95)
+    allocation_below_ema : allocation when price < 50 EMA (default 0.60)
+    ema_period           : EMA period
+    atr_period           : ATR period
+    ema_stop_mult        : ATR multiplier for the EMA-based stop
+    """
+
+    def __init__(
+        self,
+        allocation_above_ema: float = 0.95,
+        allocation_below_ema: float = 0.60,
+        ema_period: int = 50,
+        atr_period: int = 14,
+        ema_stop_mult: float = 0.5,
+    ) -> None:
+        self.allocation_above_ema = allocation_above_ema
+        self.allocation_below_ema = allocation_below_ema
+        self.ema_period = ema_period
+        self.atr_period = atr_period
+        self.ema_stop_mult = ema_stop_mult
+
+    @property
+    def name(self) -> str:
+        return "MidVolCautiousStrategy"
+
+    @property
+    def total_allocation(self) -> float:
+        # Report the conservative floor; actual allocation depends on EMA filter.
+        return self.allocation_below_ema
+
+    def generate_signal(
+        self,
+        symbol: str,
+        bars: pd.DataFrame,
+        regime_state: RegimeState,
+    ) -> Optional[Signal]:
+        if not self._has_enough_bars(bars):
+            logger.debug("MidVolCautious: %s has only %d bars (need %d)", symbol, len(bars), self.MIN_BARS)
+            return None
+
+        close   = bars["close"]
+        high    = bars["high"]
+        low     = bars["low"]
+
+        price    = float(close.iloc[-1])
+        ema50    = _ema(close, self.ema_period)
+        atr_val  = _atr(high, low, close, self.atr_period)
+        above    = price > ema50
+
+        allocation = self.allocation_above_ema if above else self.allocation_below_ema
+        stop_loss  = ema50 - self.ema_stop_mult * atr_val
+        trend_str  = "above" if above else "below"
+
+        return Signal(
+            symbol=symbol,
+            direction=Direction.LONG,
+            confidence=regime_state.probability,
+            entry_price=price,
+            stop_loss=stop_loss,
+            take_profit=None,
+            position_size_pct=allocation,
+            leverage=1.0,
+            regime_id=regime_state.state_id,
+            regime_name=regime_state.label,
+            regime_probability=regime_state.probability,
+            timestamp=pd.Timestamp(bars.index[-1]),
+            reasoning=(
+                f"MidVol regime — price {trend_str} EMA{self.ema_period} "
+                f"({price:.2f} vs {ema50:.2f}) → {allocation:.0%} allocation. "
+                f"Stop={stop_loss:.2f}  ATR={atr_val:.4f}"
+            ),
+            strategy_name=self.name,
+            metadata={
+                "ema50": round(ema50, 4),
+                "atr": round(atr_val, 4),
+                "above_ema": above,
+                "allocation_used": allocation,
+            },
+        )
+
+
+class HighVolDefensiveStrategy(BaseStrategy):
+    """
+    High-volatility defensive regime: reduced allocation, no leverage.
+
+    ALWAYS LONG — never short.  Partial deployment preserves capital for
+    V-shaped reversals that are common when volatility spikes.
+
+    Allocation : ``allocation`` (default 0.60 — 60% of portfolio)
+    Leverage   : 1.0× (no leverage in high-vol)
+    Stop       : 50EMA − 1.0×ATR
+
+    Parameters
+    ----------
+    allocation    : total portfolio fraction to deploy
+    ema_period    : EMA period for the stop calculation
+    atr_period    : ATR period
+    ema_stop_mult : ATR multiplier for the EMA-based stop (default 1.0)
+    """
+
+    def __init__(
+        self,
+        allocation: float = 0.60,
+        ema_period: int = 50,
+        atr_period: int = 14,
+        ema_stop_mult: float = 1.0,
+    ) -> None:
+        self._allocation = allocation
+        self.ema_period = ema_period
+        self.atr_period = atr_period
+        self.ema_stop_mult = ema_stop_mult
+
+    @property
+    def name(self) -> str:
+        return "HighVolDefensiveStrategy"
+
+    @property
+    def total_allocation(self) -> float:
+        return self._allocation
+
+    def generate_signal(
+        self,
+        symbol: str,
+        bars: pd.DataFrame,
+        regime_state: RegimeState,
+    ) -> Optional[Signal]:
+        if not self._has_enough_bars(bars):
+            logger.debug("HighVolDefensive: %s has only %d bars (need %d)", symbol, len(bars), self.MIN_BARS)
+            return None
+
+        close   = bars["close"]
+        high    = bars["high"]
+        low     = bars["low"]
+
+        price    = float(close.iloc[-1])
+        ema50    = _ema(close, self.ema_period)
+        atr_val  = _atr(high, low, close, self.atr_period)
+        stop_loss = ema50 - self.ema_stop_mult * atr_val
+
+        return Signal(
+            symbol=symbol,
+            direction=Direction.LONG,  # NEVER SHORT — always long, just smaller
+            confidence=regime_state.probability,
+            entry_price=price,
+            stop_loss=stop_loss,
+            take_profit=None,
+            position_size_pct=self._allocation,
+            leverage=1.0,
+            regime_id=regime_state.state_id,
+            regime_name=regime_state.label,
+            regime_probability=regime_state.probability,
+            timestamp=pd.Timestamp(bars.index[-1]),
+            reasoning=(
+                f"HighVol regime — defensive allocation ({self._allocation:.0%}), "
+                f"LONG only (never short), catching V-shaped rebounds. "
+                f"EMA{self.ema_period}={ema50:.2f}  ATR={atr_val:.4f}  Stop={stop_loss:.2f}"
+            ),
+            strategy_name=self.name,
+            metadata={
+                "ema50": round(ema50, 4),
+                "atr": round(atr_val, 4),
+            },
+        )
+
+
+# ── Backward-compatible aliases ────────────────────────────────────────────────
+
+CrashDefensiveStrategy      = HighVolDefensiveStrategy
+BearTrendStrategy           = HighVolDefensiveStrategy
+MeanReversionStrategy       = MidVolCautiousStrategy
+BullTrendStrategy           = LowVolBullStrategy
+EuphoriaCautiousStrategy    = LowVolBullStrategy
+
+# ── Static label → strategy class (fallback / label-lookup convenience) ────────
+
+#: Maps every possible HMM regime label to a strategy class.
+#: The dynamic :class:`StrategyOrchestrator` vol-rank mapping takes precedence;
+#: use this only when you need a quick class reference by label name.
+LABEL_TO_STRATEGY: Dict[str, Type[BaseStrategy]] = {
+    # 3-state
+    "BEAR":         HighVolDefensiveStrategy,
+    "NEUTRAL":      MidVolCautiousStrategy,
+    "BULL":         LowVolBullStrategy,
+    # 4-state additions
+    "CRASH":        HighVolDefensiveStrategy,
+    "EUPHORIA":     LowVolBullStrategy,
+    # 6/7-state additions
+    "STRONG_BEAR":  HighVolDefensiveStrategy,
+    "WEAK_BEAR":    MidVolCautiousStrategy,
+    "WEAK_BULL":    MidVolCautiousStrategy,
+    "STRONG_BULL":  LowVolBullStrategy,
+}
+
+
+# ── Strategy orchestrator ──────────────────────────────────────────────────────
+
+class StrategyOrchestrator:
+    """
+    Translate HMM regime outputs into per-symbol :class:`Signal` objects.
+
+    Initialisation
+    --------------
+    Accepts the ``regime_infos`` dict from a fitted :class:`~core.hmm_engine.HMMEngine`,
+    sorts regimes by ``expected_volatility`` (ascending), and assigns a strategy to
+    each ``regime_id`` based on its normalised volatility rank.
+
+    This vol-rank sort is *independent* of the label sort (which is by return).
+    A "BULL" label could be high-vol or low-vol depending on what the HMM learned.
+
+    Parameters
+    ----------
+    config           : full settings dict (broker/strategy section is consumed)
+    regime_infos     : ``{label: RegimeInfo}`` from a fitted HMMEngine
+    min_confidence   : posterior probability below which uncertainty mode triggers
+    rebalance_threshold : relative deviation required to actually place a rebalance
+    """
+
+    def __init__(
+        self,
+        config: Dict[str, Any],
+        regime_infos: Dict[str, RegimeInfo],
+        min_confidence: float = 0.55,
+        rebalance_threshold: float = 0.10,
+    ) -> None:
+        self.config = config
+        self.min_confidence = min_confidence
+        self.rebalance_threshold = rebalance_threshold
+
+        strategy_cfg = config.get("strategy", {})
+        self._low_vol_allocation: float   = strategy_cfg.get("low_vol_allocation", 0.95)
+        self._mid_trend_allocation: float = strategy_cfg.get("mid_vol_allocation_trend", 0.95)
+        self._mid_notrd_allocation: float = strategy_cfg.get("mid_vol_allocation_no_trend", 0.60)
+        self._high_vol_allocation: float  = strategy_cfg.get("high_vol_allocation", 0.60)
+        self._low_vol_leverage: float     = strategy_cfg.get("low_vol_leverage", 1.25)
+        self._uncertainty_mult: float     = strategy_cfg.get("uncertainty_size_mult", 0.50)
+
+        # regime_id → BaseStrategy
+        self._regime_to_strategy: Dict[int, BaseStrategy] = {}
+        # regime_id → normalised vol rank (0.0 = calmest, 1.0 = most volatile)
+        self._vol_ranks: Dict[int, float] = {}
+        # regime_id → RegimeInfo (for metadata queries)
+        self._regime_infos: Dict[int, RegimeInfo] = {
+            info.regime_id: info for info in regime_infos.values()
+        }
+        # Last known per-symbol portfolio weights (for rebalance filter)
+        self._current_weights: Dict[str, float] = {}
+
+        self._build_strategy_map(regime_infos)
+
+    # ── Initialisation ─────────────────────────────────────────────────────────
+
+    def _build_strategy_map(self, regime_infos: Dict[str, RegimeInfo]) -> None:
+        """
+        Sort regimes by ``expected_volatility`` and assign a strategy tier.
+
+        Vol-rank formula: ``rank_idx / (n_regimes − 1)`` ∈ [0.0, 1.0]
+          ≤ 0.33  → :class:`LowVolBullStrategy`
+          ≥ 0.67  → :class:`HighVolDefensiveStrategy`
+          else    → :class:`MidVolCautiousStrategy`
+        """
+        sorted_regimes = sorted(
+            regime_infos.values(),
+            key=lambda r: r.expected_volatility,
+        )
+        n = len(sorted_regimes)
+
+        for rank_idx, regime_info in enumerate(sorted_regimes):
+            vol_rank = rank_idx / (n - 1) if n > 1 else 0.5
+            self._vol_ranks[regime_info.regime_id] = vol_rank
+
+            if vol_rank <= 0.33:
+                strategy: BaseStrategy = LowVolBullStrategy(
+                    allocation=self._low_vol_allocation,
+                    leverage=self._low_vol_leverage,
+                )
+                tier = "low_vol"
+            elif vol_rank >= 0.67:
+                strategy = HighVolDefensiveStrategy(
+                    allocation=self._high_vol_allocation,
+                )
+                tier = "high_vol"
+            else:
+                strategy = MidVolCautiousStrategy(
+                    allocation_above_ema=self._mid_trend_allocation,
+                    allocation_below_ema=self._mid_notrd_allocation,
+                )
+                tier = "mid_vol"
+
+            self._regime_to_strategy[regime_info.regime_id] = strategy
+
+            logger.info(
+                "Regime '%s' (id=%d, exp_vol=%.4f) → vol_rank=%.2f → %s [%s]",
+                regime_info.regime_name,
+                regime_info.regime_id,
+                regime_info.expected_volatility,
+                vol_rank,
+                type(strategy).__name__,
+                tier,
+            )
+
+    # ── Signal generation ──────────────────────────────────────────────────────
+
+    def generate_signals(
+        self,
+        symbols: List[str],
+        bars: Dict[str, pd.DataFrame],
+        regime_state: RegimeState,
+        is_flickering: bool = False,
+    ) -> List[Signal]:
+        """
+        Generate per-symbol signals for the current regime.
+
+        Steps
+        -----
+        1. Look up the strategy for ``regime_state.state_id``.
+        2. Detect uncertainty mode (low confidence or flickering).
+        3. Call strategy.generate_signal() for each symbol.
+        4. Apply uncertainty discount (halve sizes, drop leverage).
+        5. Divide total allocation equally across LONG signals.
+        6. Apply rebalance filter (skip if deviation < threshold).
+
+        Parameters
+        ----------
+        symbols      : list of tickers to process
+        bars         : ``{symbol: OHLCV DataFrame}``
+        regime_state : current :class:`~core.hmm_engine.RegimeState`
+        is_flickering: True if the HMM engine reports flicker activity
+
+        Returns
+        -------
+        List of :class:`Signal` that warrant a trade or rebalance.
+        """
+        strategy = self._regime_to_strategy.get(regime_state.state_id)
+        if strategy is None:
+            logger.warning(
+                "No strategy for regime_id=%d (label=%s) — returning no signals.",
+                regime_state.state_id,
+                regime_state.label,
+            )
+            return []
+
+        uncertainty = (
+            regime_state.probability < self.min_confidence
+            or is_flickering
+            or not regime_state.is_confirmed
+        )
+
+        if uncertainty:
+            reason_parts = []
+            if regime_state.probability < self.min_confidence:
+                reason_parts.append(f"p={regime_state.probability:.3f} < {self.min_confidence}")
+            if is_flickering:
+                reason_parts.append("flickering")
+            if not regime_state.is_confirmed:
+                reason_parts.append("unconfirmed")
+            logger.debug("Uncertainty mode active: %s", ", ".join(reason_parts))
+
+        # ── Per-symbol signal generation ──────────────────────────────────────
+        raw: List[Signal] = []
+        for symbol in symbols:
+            symbol_bars = bars.get(symbol)
+            if symbol_bars is None or len(symbol_bars) < strategy.MIN_BARS:
+                continue
+            sig = strategy.generate_signal(symbol, symbol_bars, regime_state)
+            if sig is not None:
+                raw.append(sig)
+
+        if not raw:
+            return []
+
+        # ── Uncertainty discount ───────────────────────────────────────────────
+        if uncertainty:
+            raw = [self._apply_uncertainty_discount(s) for s in raw]
+
+        # ── Distribute allocation across LONG symbols ─────────────────────────
+        n_long = sum(1 for s in raw if s.direction == Direction.LONG)
+        if n_long > 0:
+            for s in raw:
+                if s.direction == Direction.LONG:
+                    # Convert strategy-level total allocation to per-symbol weight
+                    s.position_size_pct = round(s.position_size_pct / n_long, 6)
+
+        # ── Rebalance filter ──────────────────────────────────────────────────
+        filtered: List[Signal] = []
+        for s in raw:
+            current = self._current_weights.get(s.symbol, 0.0)
+            deviation = abs(s.position_size_pct - current)
+            threshold = self.rebalance_threshold * max(s.position_size_pct, 1e-8)
+            if deviation >= threshold:
+                filtered.append(s)
+            else:
+                logger.debug(
+                    "%s: skip rebalance — deviation %.4f < threshold %.4f",
+                    s.symbol,
+                    deviation,
+                    threshold,
+                )
+
+        if filtered:
+            logger.info(
+                "Regime '%s' (p=%.3f)  strategy=%s  signals=%d/%d  uncertainty=%s",
+                regime_state.label,
+                regime_state.probability,
+                type(strategy).__name__,
+                len(filtered),
+                len(symbols),
+                uncertainty,
+            )
+
+        return filtered
+
+    # ── State management ───────────────────────────────────────────────────────
+
+    def update_weights(self, weights: Dict[str, float]) -> None:
+        """
+        Sync the orchestrator's view of current portfolio weights.
+
+        Call this after each batch of fills to keep the rebalance filter
+        accurate.
+
+        Parameters
+        ----------
+        weights : ``{symbol: current_weight}``
+        """
+        self._current_weights.update(weights)
+
+    def reset_weights(self) -> None:
+        """Reset all tracked weights to zero (e.g. at session start)."""
+        self._current_weights.clear()
+
+    # ── Query helpers ──────────────────────────────────────────────────────────
+
+    def get_vol_rank(self, regime_id: int) -> Optional[float]:
+        """Return the normalised volatility rank for ``regime_id``."""
+        return self._vol_ranks.get(regime_id)
+
+    def get_strategy_for_regime(self, regime_id: int) -> Optional[BaseStrategy]:
+        """Return the strategy instance mapped to ``regime_id``."""
+        return self._regime_to_strategy.get(regime_id)
+
+    def get_regime_info(self, regime_id: int) -> Optional[RegimeInfo]:
+        """Return :class:`~core.hmm_engine.RegimeInfo` for ``regime_id``."""
+        return self._regime_infos.get(regime_id)
+
+    def summary(self) -> Dict[int, Dict[str, Any]]:
+        """
+        Return a dict summarising the vol-rank → strategy mapping for
+        logging / dashboard display.
+        """
+        out: Dict[int, Dict[str, Any]] = {}
+        for rid, strategy in self._regime_to_strategy.items():
+            info = self._regime_infos.get(rid)
+            out[rid] = {
+                "label": info.regime_name if info else "?",
+                "vol_rank": round(self._vol_ranks.get(rid, float("nan")), 3),
+                "strategy": strategy.name,
+                "total_allocation": strategy.total_allocation,
+            }
+        return out
+
+    # ── Private helpers ────────────────────────────────────────────────────────
+
+    def _apply_uncertainty_discount(self, signal: Signal) -> Signal:
+        """
+        Halve position size and remove leverage.
+
+        Called when the regime confidence is below threshold or
+        the HMM is flickering.
+        """
+        signal.position_size_pct = round(signal.position_size_pct * self._uncertainty_mult, 6)
+        signal.leverage = 1.0
+        if not signal.reasoning.startswith("[UNCERTAINTY]"):
+            signal.reasoning = "[UNCERTAINTY] " + signal.reasoning
+        return signal
+
+    def _needs_rebalance(self, symbol: str, target_weight: float) -> bool:
+        """True when the absolute deviation exceeds the relative threshold."""
+        current = self._current_weights.get(symbol, 0.0)
+        threshold = self.rebalance_threshold * max(target_weight, 1e-8)
+        return abs(target_weight - current) >= threshold
+
+
+# ── Backward-compatible RegimeStrategy alias ──────────────────────────────────
+#: ``RegimeStrategy`` was the name used in earlier skeleton code.
+#: New code should use :class:`StrategyOrchestrator` directly.
+RegimeStrategy = StrategyOrchestrator
+
+# Keep AllocationResult as a thin alias pointing to Signal for any legacy
+# code that referenced it from the original skeleton.
+AllocationResult = Signal
