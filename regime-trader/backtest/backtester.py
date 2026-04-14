@@ -179,6 +179,9 @@ class WalkForwardBacktester:
         risk_free_rate: float = 0.045,
         fill_delay: int = 1,
         zscore_window: int = 60,
+        sma_long: int = 200,
+        sma_trend: int = 50,
+        volume_norm_window: int = 50,
     ) -> None:
         self.symbols = symbols
         self.initial_capital = initial_capital
@@ -189,6 +192,9 @@ class WalkForwardBacktester:
         self.risk_free_rate = risk_free_rate
         self.fill_delay = fill_delay
         self.zscore_window = zscore_window
+        self.sma_long = sma_long
+        self.sma_trend = sma_trend
+        self.volume_norm_window = volume_norm_window
 
         self._results: Optional[BacktestResult] = None
 
@@ -200,6 +206,7 @@ class WalkForwardBacktester:
         hmm_config: Optional[Dict] = None,
         strategy_config: Optional[Dict] = None,
         risk_config: Optional[Dict] = None,
+        progress_callback=None,
     ) -> BacktestResult:
         """
         Execute the full walk-forward backtest.
@@ -238,7 +245,12 @@ class WalkForwardBacktester:
 
         # ── Compute features on the full price history (market symbol = first) ─
         market_sym = syms[0]
-        fe = FeatureEngineer(zscore_window=self.zscore_window)
+        fe = FeatureEngineer(
+            zscore_window=self.zscore_window,
+            sma_long=self.sma_long,
+            sma_trend=self.sma_trend,
+            volume_norm_window=self.volume_norm_window,
+        )
         full_features_raw = fe.build_feature_matrix(ohlcv[market_sym], dropna=False)
 
         # ── Identify clean rows (all features non-NaN) ────────────────────────
@@ -291,6 +303,16 @@ class WalkForwardBacktester:
                 equity,
             )
 
+            if progress_callback is not None:
+                progress_callback(fold_id, len(windows_idx), "training", {
+                    "symbols":   syms,
+                    "is_start":  is_features.index[0].date(),
+                    "is_end":    is_features.index[-1].date(),
+                    "oos_start": oos_features.index[0].date(),
+                    "oos_end":   oos_features.index[-1].date(),
+                    "equity":    equity,
+                })
+
             try:
                 wr = self._run_single_window(
                     fold_id, prices, ohlcv, is_features, oos_features,
@@ -303,6 +325,16 @@ class WalkForwardBacktester:
             fold_results.append(wr)
             if len(wr.equity_curve) > 0:
                 equity = float(wr.equity_curve.iloc[-1])
+
+            if progress_callback is not None:
+                progress_callback(fold_id, len(windows_idx), "complete", {
+                    "symbols":     syms,
+                    "oos_start":   wr.test_start.date(),
+                    "oos_end":     wr.test_end.date(),
+                    "fold_trades": len(wr.trades),
+                    "n_states":    wr.n_hmm_states,
+                    "equity":      equity,
+                })
 
         if not fold_results:
             raise RuntimeError("All folds failed — no BacktestResult produced.")

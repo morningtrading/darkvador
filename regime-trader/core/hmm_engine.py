@@ -457,7 +457,7 @@ class HMMEngine:
             if self._confirmed_state < 0:
                 logger.info("Initial regime confirmed: %s (p=%.3f)", nxt, float(probs[raw_state]))
             else:
-                logger.warning(
+                logger.info(
                     "Regime change confirmed: %s → %s  p=%.3f  t=%s",
                     prev, nxt, float(probs[raw_state]), timestamp,
                 )

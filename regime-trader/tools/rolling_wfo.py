@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import os
 import re
 import shutil
 import subprocess
@@ -79,12 +80,15 @@ _ANSI_RE    = re.compile(r"\x1b\[[0-9;]*m")
 _SUMMARY_RE = re.compile(
     r"Total return:\s*([\+\-\d\.]+%)\s+Sharpe:\s*([\d\.]+)\s+MaxDD:\s*([\+\-\d\.]+%)"
 )
-_TRADES_RE  = re.compile(r"Total trades\s*:\s*(\d+)")
+_TRADES_RE   = re.compile(r"Total trades\s*:\s*(\d+)")
+_REGIME_RE   = re.compile(r"Regime changes\s*:\s*(\d+)")
 
 _STREAM_PATTERNS = [
     re.compile(r"Folds completed"),
     re.compile(r"Total trades"),
     re.compile(r"Backtest complete"),
+    re.compile(r"Backtest failed"),
+    re.compile(r"All folds failed"),
     re.compile(r"ERROR|CRITICAL", re.IGNORECASE),
 ]
 
@@ -97,11 +101,13 @@ def _parse_metrics(output: str) -> Dict[str, str]:
     clean = _strip_ansi(output)
     m = _SUMMARY_RE.search(clean)
     t = _TRADES_RE.search(clean)
+    r = _REGIME_RE.search(clean)
     return {
-        "total_return": m.group(1) if m else "ERR",
-        "sharpe":       m.group(2) if m else "ERR",
-        "max_dd":       m.group(3) if m else "ERR",
-        "trades":       t.group(1) if t else "—",
+        "total_return":   m.group(1) if m else "ERR",
+        "sharpe":         m.group(2) if m else "ERR",
+        "max_dd":         m.group(3) if m else "ERR",
+        "trades":         t.group(1) if t else "—",
+        "regime_changes": r.group(1) if r else "0",
     }
 
 
@@ -130,12 +136,15 @@ def _apply_variant(base: dict, overrides: Dict[str, Any]) -> dict:
 
 def _run_streaming(cmd: List[str], indent: str = "      ") -> str:
     """Run a subprocess, stream matching lines, return full output."""
+    env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
+        encoding="utf-8",
         cwd=str(ROOT),
+        env=env,
     )
     captured: List[str] = []
     assert proc.stdout is not None
@@ -287,39 +296,82 @@ def main() -> None:
         print("ERROR: not enough data for even one fold. Try an earlier --start date.")
         sys.exit(1)
 
-    # ── Scale walk-forward windows to fit inside the tune/test periods ───────
-    # The backtest walk-forward needs train_window + test_window + buffer bars.
-    # A 6-month tune window ≈ 126 daily bars — far less than the default 252+126.
-    # We scale down so every tune/test run has at least one complete WF fold.
+    # ── Scale walk-forward windows accounting for feature + z-score warmup ───
+    #
+    # The pipeline warmup determines how many bars are consumed before the
+    # first clean (non-NaN) feature row is available.
+    #
+    # Dominant warmup chain (sma_trend -> slope -> zscore):
+    #   sma_trend rolling mean : sma_trend - 1 bars
+    #   slope window (10 bars) : +9 bars
+    #   zscore window          : +zscore_window - 1 bars
+    #   Total: sma_trend + slope_window + zscore_window - 3
+    #
+    # For WFO tune runs we reduce sma_long and sma_trend from their live
+    # defaults (200/50) to 20/20.  This brings warmup from 117 bars down to
+    # 87 bars, making 12-month tune windows viable.
+    #
+    # TEST phase: we extend the start date back to tune_start so the backtester
+    # trains on the tune period and evaluates on the test period as a single
+    # WF fold.  The test run spans (tune_bars + test_bars) total.
     TRADING_DAYS_PER_MONTH = 21
-    tune_bars   = args.tune_months * TRADING_DAYS_PER_MONTH
-    test_bars   = args.test_months * TRADING_DAYS_PER_MONTH
-    # Use 55% for IS training, 25% for OOS test, leaving 20% buffer
-    wf_train    = max(42, int(tune_bars * 0.55))
-    wf_test     = max(21, int(tune_bars * 0.25))
-    wf_step     = wf_test
-    # Overrides applied to EVERY tune variant run
+    _WFO_SMA_LONG          = 20   # reduced from 200 — eliminates 200-bar warmup
+    _WFO_SMA_TREND         = 20   # reduced from  50
+    _WFO_VOLUME_NORM       = 20   # reduced from  50
+    _WFO_ZSCORE            = 60   # kept at default
+    _WFO_SLOPE_WINDOW      = 10   # hardcoded in compute_sma_slope — not configurable
+    # Dominant warmup chain:
+    #   sma50_slope = (sma_trend-1) + (slope_window-1) = 19 + 9 = 28  ← dominant
+    #   volume_norm = (volume_norm_window-1)            = 19
+    #   zscore(60)  = +59 on top of the dominant raw feature
+    #   total = 28 + 59 = 87.  Add 1 bar safety → 88.
+    #   volume_norm(20) first non-NaN at row 19
+    #   zscore(60)      first non-NaN at row 19 + 59 = 78
+    # (sma_trend=20 + slope=10 → row 28, dominated by volume_norm)
+    _WARMUP = (_WFO_SMA_TREND - 1) + (_WFO_SLOPE_WINDOW - 1) + (_WFO_ZSCORE - 1) + 1
+    # = 19 + 9 + 59 + 1(safety) = 88 bars
+
+    tune_bars = args.tune_months * TRADING_DAYS_PER_MONTH
+    test_bars = args.test_months * TRADING_DAYS_PER_MONTH
+
+    tune_available = max(0, tune_bars - _WARMUP)   # usable bars after warmup
+    # Split tune_available: 65% training, 30% OOS-within-tune, 5% buffer
+    wf_train = max(42, int(tune_available * 0.65))
+    wf_test  = max(21, int(tune_available * 0.30))
+    wf_step  = wf_test
     _TUNE_BT_OVERRIDES = {
-        "backtest.train_window": wf_train,
-        "backtest.test_window":  wf_test,
-        "backtest.step_size":    wf_step,
-        "hmm.min_train_bars":    max(20, wf_train - 5),   # must be < train_window
+        "backtest.train_window":       wf_train,
+        "backtest.test_window":        wf_test,
+        "backtest.step_size":          wf_step,
+        "backtest.sma_long":           _WFO_SMA_LONG,
+        "backtest.sma_trend":          _WFO_SMA_TREND,
+        "backtest.volume_norm_window": _WFO_VOLUME_NORM,
+        "backtest.zscore_window":      _WFO_ZSCORE,
+        "hmm.min_train_bars":          max(20, wf_train - 5),
     }
-    # Scale test-phase BT windows to fit the test period
-    test_wf_train = max(42, int(test_bars * 0.55))
-    test_wf_test  = max(21, int(test_bars * 0.25))
+
+    # TEST phase: backtester receives tune_start→test_end data.
+    # train_window = tune_available - 15 (leaves 15-bar buffer for short months);
+    # test_window  = test_bars so OOS evaluation covers exactly the test period.
+    test_wf_train = max(42, tune_available - 15)
+    test_wf_test  = test_bars
     _TEST_BT_OVERRIDES = {
-        "backtest.train_window": test_wf_train,
-        "backtest.test_window":  test_wf_test,
-        "backtest.step_size":    test_wf_test,
-        "hmm.min_train_bars":    max(20, test_wf_train - 5),  # must be < train_window
+        "backtest.train_window":       test_wf_train,
+        "backtest.test_window":        test_wf_test,
+        "backtest.step_size":          test_wf_test,
+        "backtest.sma_long":           _WFO_SMA_LONG,
+        "backtest.sma_trend":          _WFO_SMA_TREND,
+        "backtest.volume_norm_window": _WFO_VOLUME_NORM,
+        "backtest.zscore_window":      _WFO_ZSCORE,
+        "hmm.min_train_bars":          max(20, test_wf_train - 5),
     }
 
     # ── Window / fold summary (shared between --show-windows and normal run) ──
-    tune_min_needed = wf_train + wf_test
-    tune_buffer     = tune_bars - tune_min_needed
-    test_min_needed = test_wf_train + test_wf_test
-    test_buffer     = test_bars - test_min_needed
+    tune_total_needed = _WARMUP + wf_train + wf_test
+    tune_buffer       = tune_bars - tune_total_needed
+    test_total_data   = tune_bars + test_bars       # test run spans tune+test
+    test_total_needed = _WARMUP + test_wf_train + test_wf_test
+    test_buffer       = test_total_data - test_total_needed
 
     def _print_windows() -> None:
         print(f"\n{'=' * 70}")
@@ -337,20 +389,29 @@ def main() -> None:
         print(f"{'─' * 70}")
         tune_hmm_min = max(20, wf_train - 5)
         test_hmm_min = max(20, test_wf_train - 5)
+        _feat_warmup = (_WFO_SMA_TREND - 1) + (_WFO_SLOPE_WINDOW - 1)
+        print(f"  Pipeline warmup : {_WARMUP} bars  "
+              f"(sma_slope={_feat_warmup}, zscore={_WFO_ZSCORE}, +1 safety)  "
+              f"→ {tune_bars - _WARMUP} bars usable after warmup")
+        print(f"{'─' * 70}")
         print(f"  TUNE phase backtest windows (applied to each variant):")
-        print(f"    train_window   : {wf_train} bars  (55% of {tune_bars})")
-        print(f"    test_window    : {wf_test} bars  (25% of {tune_bars})")
+        print(f"    data fetched   : tune_start → tune_end  (~{tune_bars} bars)")
+        print(f"    train_window   : {wf_train} bars  (65% of {tune_bars - _WARMUP} usable)")
+        print(f"    test_window    : {wf_test} bars  (30% of {tune_bars - _WARMUP} usable)")
         print(f"    step_size      : {wf_step} bars")
-        print(f"    min_train_bars : {tune_hmm_min} bars  (train_window - 5)")
-        print(f"    min needed     : {tune_min_needed} bars   available: {tune_bars}   buffer: {tune_buffer} bars"
+        print(f"    min_train_bars : {tune_hmm_min} bars")
+        print(f"    total needed   : warmup({_WARMUP}) + train({wf_train}) + test({wf_test}) = {tune_total_needed}"
+              + f"   available: {tune_bars}   buffer: {tune_buffer}"
               + ("  ✓" if tune_buffer >= 0 else "  ✗ TOO SHORT"))
         print(f"{'─' * 70}")
-        print(f"  TEST phase backtest windows (applied to winning params):")
-        print(f"    train_window   : {test_wf_train} bars  (55% of {test_bars})")
-        print(f"    test_window    : {test_wf_test} bars  (25% of {test_bars})")
+        print(f"  TEST phase backtest windows (winner applied, data = tune+test span):")
+        print(f"    data fetched   : tune_start → test_end  (~{test_total_data} bars)")
+        print(f"    train_window   : {test_wf_train} bars  (covers tune period)")
+        print(f"    test_window    : {test_wf_test} bars  (covers test period, OOS)")
         print(f"    step_size      : {test_wf_test} bars")
-        print(f"    min_train_bars : {test_hmm_min} bars  (train_window - 5)")
-        print(f"    min needed     : {test_min_needed} bars   available: {test_bars}   buffer: {test_buffer} bars"
+        print(f"    min_train_bars : {test_hmm_min} bars")
+        print(f"    total needed   : warmup({_WARMUP}) + train({test_wf_train}) + test({test_wf_test}) = {test_total_needed}"
+              + f"   available: {test_total_data}   buffer: {test_buffer}"
               + ("  ✓" if test_buffer >= 0 else "  ✗ TOO SHORT"))
         print(f"{'─' * 70}")
         print(f"  {'Fold':<4}  {'Tune window':<25}  {'Test window':<25}  Notes")
@@ -374,8 +435,9 @@ def main() -> None:
     print(f"  Tune window : {args.tune_months} months (~{tune_bars} bars)")
     print(f"  Test window : {args.test_months} months")
     print(f"  Step        : {args.step_months} months")
-    print(f"  Tune WF     : IS={wf_train} / OOS={wf_test} / step={wf_step} bars (scaled to fit tune)")
-    print(f"  Test WF     : IS={test_wf_train} / OOS={test_wf_test} / step={test_wf_test} bars (scaled to fit test)")
+    print(f"  Warmup      : {_WARMUP} bars  → {tune_bars - _WARMUP} usable per tune window")
+    print(f"  Tune WF     : IS={wf_train} / OOS={wf_test} / step={wf_step} bars")
+    print(f"  Test run    : IS={test_wf_train} (tune period) / OOS={test_wf_test} (test period) — single fold")
     print(f"  Folds       : {len(folds)}")
     print(f"  Variants    : {len(VARIANTS)} per fold")
     total_runs = len(folds) * len(VARIANTS)
@@ -419,13 +481,15 @@ def main() -> None:
                 except ValueError:
                     sharpe = -999.0
                     # First ERR in this fold — dump raw output to diagnose
-                    if not _debug_dumped and fi == 1:
+                    if not _debug_dumped:
                         _dump_tail(output, n=40, label=f"fold {fi} variant {vi}")
                         _debug_dumped = True
 
                 print(f"         → Sharpe {sharpe_str}  "
                       f"Return {metrics['total_return']}  "
-                      f"MaxDD {metrics['max_dd']}", flush=True)
+                      f"MaxDD {metrics['max_dd']}  "
+                      f"Trades {metrics['trades']}  "
+                      f"({_fmt(tune_start)} → {_fmt(tune_end)})", flush=True)
 
                 if sharpe > best_sharpe:
                     best_sharpe   = sharpe
@@ -434,20 +498,23 @@ def main() -> None:
 
             print(f"\n  [TUNE WINNER] {best_label}  (Sharpe {best_sharpe:.3f})", flush=True)
 
-            # ── Apply best params + test-period BT window scaling ────────────
-            # best_overrides contains only HMM/strategy params.
-            # We merge _TEST_BT_OVERRIDES so the test period (e.g. 3 months)
-            # has appropriately scaled walk-forward windows.
+            # ── Apply best params for test run ────────────────────────────────
+            # Merge winning HMM/strategy params with _TEST_BT_OVERRIDES.
+            # The test run fetches from tune_start → test_end so the backtester
+            # trains on the tune period (IS) and evaluates on the test period (OOS)
+            # as a single WF fold — the only way to get valid metrics given that
+            # the test period alone (3 months) is shorter than the pipeline warmup.
             test_overrides = {**best_overrides, **_TEST_BT_OVERRIDES}
             best_cfg = _apply_variant(base_cfg, test_overrides)
             with open(SETTINGS, "w", encoding="utf-8") as fh:
                 yaml.dump(best_cfg, fh, default_flow_style=False, sort_keys=False)
 
-            # ── TEST: blind run on held-out window ───────────────────────────
+            # ── TEST: blind run spanning tune_start → test_end ────────────────
             print(f"\n  [TEST] Blind test on {_fmt(test_start)} → {_fmt(test_end)} ...",
                   flush=True)
             t0          = time.monotonic()
-            test_output = _run_test(resolved_symbols, _fmt(test_start), _fmt(test_end))
+            # Pass tune_start as start so the backtester has enough warmup data
+            test_output = _run_test(resolved_symbols, _fmt(tune_start), _fmt(test_end))
             test_time   = time.monotonic() - t0
             test_metrics = _parse_metrics(test_output)
 
@@ -470,14 +537,15 @@ def main() -> None:
                   f"  ({_fmt_elapsed(test_time)})", flush=True)
 
             fold_results.append({
-                "Fold":        str(fi),
-                "Tune period": f"{_fmt(tune_start)} → {_fmt(tune_end)}",
-                "Test period": f"{_fmt(test_start)} → {_fmt(test_end)}",
-                "Best params": best_label,
-                "Test Return": test_metrics["total_return"],
-                "Test Sharpe": test_metrics["sharpe"],
-                "Test MaxDD":  test_metrics["max_dd"],
-                "Beats B&H":   beats_bnh,
+                "Fold":           str(fi),
+                "Tune period":    f"{_fmt(tune_start)} → {_fmt(tune_end)}",
+                "Test period":    f"{_fmt(test_start)} → {_fmt(test_end)}",
+                "Best params":    best_label,
+                "Test Return":    test_metrics["total_return"],
+                "Test Sharpe":    test_metrics["sharpe"],
+                "Test MaxDD":     test_metrics["max_dd"],
+                "Beats B&H":      beats_bnh,
+                "regime_changes": test_metrics["regime_changes"],
             })
 
     finally:
@@ -504,9 +572,13 @@ def main() -> None:
 
     beats_count = sum(1 for r in fold_results if r["Beats B&H"] == "YES")
     total_folds = len(fold_results)
+    total_regime_changes = sum(int(r.get("regime_changes", 0)) for r in fold_results)
 
     print(f"  Robustness    : {beats_count}/{total_folds} folds beat Buy & Hold"
           f"  ({100 * beats_count / total_folds:.0f}%)")
+    print(f"  Regime changes: {total_regime_changes} total across all test folds"
+          f"  (~{total_regime_changes / total_folds:.1f} per fold)"
+          if total_folds > 0 else f"  Regime changes: {total_regime_changes}")
 
     if valid_sharpes:
         import statistics

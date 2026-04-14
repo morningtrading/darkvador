@@ -265,6 +265,7 @@ def _print_comparison_table(
     strategy_report,
     bnh_metrics: Optional[Dict],
     sma_metrics: Optional[Dict],
+    ema_cross_metrics: Optional[Dict],
     rand_metrics: Optional[Dict],
     console=None,
     n_symbols: int = 1,
@@ -292,8 +293,9 @@ def _print_comparison_table(
         except Exception:
             return str(v)
 
-    bnh_label = "Buy & Hold (EW)" if n_symbols > 1 else "Buy & Hold"
-    sma_label = "SMA-200 (EW)"   if n_symbols > 1 else "SMA-200 Trend"
+    bnh_label      = "Buy & Hold (EW)" if n_symbols > 1 else "Buy & Hold"
+    sma_label      = "SMA-200 (EW)"    if n_symbols > 1 else "SMA-200 Trend"
+    ema_cross_label = "EMA 9/45 (EW)"  if n_symbols > 1 else "EMA 9/45 Cross"
 
     if console:
         try:
@@ -301,17 +303,19 @@ def _print_comparison_table(
             from rich import box as rbox
             tbl = Table(title="Benchmark Comparison", box=rbox.ROUNDED,
                         header_style="bold yellow")
-            tbl.add_column("Metric",        style="dim", min_width=18)
-            tbl.add_column("Strategy",      justify="right")
-            tbl.add_column(bnh_label,       justify="right")
-            tbl.add_column(sma_label,       justify="right")
-            tbl.add_column("Random (mean)", justify="right")
+            tbl.add_column("Metric",          style="dim", min_width=18)
+            tbl.add_column("Strategy",        justify="right")
+            tbl.add_column(bnh_label,         justify="right")
+            tbl.add_column(sma_label,         justify="right")
+            tbl.add_column(ema_cross_label,   justify="right")
+            tbl.add_column("Random (mean)",   justify="right")
             for label, key, fmt in rows:
                 tbl.add_row(
                     label,
                     _val(strategy_report, key, fmt),
                     _val(bnh_metrics, key, fmt),
                     _val(sma_metrics, key, fmt),
+                    _val(ema_cross_metrics, key, fmt),
                     _val(rand_metrics, key, fmt),
                 )
             console.print(tbl)
@@ -320,13 +324,14 @@ def _print_comparison_table(
             pass
 
     print("\nBENCHMARK COMPARISON")
-    print(f"{'Metric':<20} {'Strategy':>12} {'BnH':>12} {'SMA-200':>12} {'Random':>12}")
-    print("-" * 70)
+    print(f"{'Metric':<20} {'Strategy':>12} {'BnH':>12} {'SMA-200':>12} {'EMA 9/45':>12} {'Random':>12}")
+    print("-" * 82)
     for label, key, fmt in rows:
         print(
             f"{label:<20} {_val(strategy_report, key, fmt):>12} "
             f"{_val(bnh_metrics, key, fmt):>12} "
             f"{_val(sma_metrics, key, fmt):>12} "
+            f"{_val(ema_cross_metrics, key, fmt):>12} "
             f"{_val(rand_metrics, key, fmt):>12}"
         )
 
@@ -560,17 +565,21 @@ def _fetch_live_bars(
         "1Min": 390, "5Min": 78, "15Min": 26, "30Min": 13,
         "1Hour": 7,  "4Hour": 2, "1Day":  1,  "1Week": 0.2,
     }.get(timeframe, 1)
-    lookback_days = max(10, int(n_bars / bars_per_day * 1.5 * 7 / 5) + 5)
+    # lookback must cover the full n_bars *plus* the feature warm-up period
+    # (dist_sma200 needs 200 bars; rolling z-score needs 252 more → 452 warm-up).
+    # Add a 40% calendar buffer for weekends/holidays.
+    warmup_bars   = n_bars + 500          # 500-bar buffer covers all warm-up windows
+    lookback_days = max(15, int(warmup_bars / bars_per_day * 1.4 * 7 / 5) + 5)
     start = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=lookback_days)).strftime(
         "%Y-%m-%dT%H:%M:%SZ"
     )
-
+    # Do NOT pass a limit — let the date range control volume, then tail() selects
+    # the most recent n_bars.  A hard limit would truncate to the oldest bars.
     req = StockBarsRequest(
         symbol_or_symbols = symbols,
         timeframe          = tf,
         start              = start,
         adjustment         = Adjustment.ALL,
-        limit              = n_bars * len(symbols),
     )
     bars = client._data_client.get_stock_bars(req)
     raw  = bars.df
@@ -591,7 +600,9 @@ def _fetch_live_bars(
             except KeyError:
                 continue
             sym_df.index = pd.to_datetime(sym_df.index).tz_localize(None)
-            sym_df = sym_df.sort_index().tail(n_bars)
+            # Keep n_bars + 500 so feature warm-up (dist_sma200=200, z-score=252)
+            # produces valid rows for the most recent n_bars.
+            sym_df = sym_df.sort_index().tail(n_bars + 500)
             if "volume" not in sym_df.columns:
                 sym_df["volume"] = 1_000_000.0
             result[sym] = sym_df
@@ -826,6 +837,87 @@ class TradingSession:
         )
         self.dashboard.start()
 
+        # Populate dashboard immediately so panels don't show "Waiting..."
+        from monitoring.dashboard import SystemStatus
+        from core.signal_generator import PortfolioSignal
+        _initial_system = SystemStatus(
+            data_ok          = True,
+            api_ok           = True,
+            api_latency_ms   = 0.0,
+            hmm_last_trained = self.hmm_engine._training_date.to_pydatetime()
+                               if getattr(self.hmm_engine, "_training_date", None) is not None else None,
+            mode             = "PAPER" if paper else "LIVE",
+        )
+        # Predict current regime from recent bars so the dashboard shows real data
+        _startup_regime   = self._last_regime
+        _startup_conf     = 0.0
+        _startup_stable   = False
+        _startup_notes    = ["Awaiting first live bar"]
+        try:
+            _ref_sym   = symbols[0]
+            _tf        = broker_cfg.get("timeframe", "5Min")
+            _pred_bars = _fetch_live_bars(self.client, [_ref_sym], _tf, n_bars=300)
+            _ref_df    = _pred_bars.get(_ref_sym)
+            if _ref_df is None:
+                _startup_notes = [f"Startup predict: no bars returned for {_ref_sym}"]
+            elif len(_ref_df) < 10:
+                _startup_notes = [f"Startup predict: only {len(_ref_df)} bars for {_ref_sym} (need 10)"]
+            else:
+                from data.feature_engineering import FeatureEngineer
+                from core.hmm_engine import RegimeState
+                _fe      = FeatureEngineer()
+                _feat_df = _fe.compute(_ref_df).dropna()
+                if len(_feat_df) < 10:
+                    _startup_notes = [f"Startup predict: only {len(_feat_df)} clean feature rows (need 10)"]
+                else:
+                    _states  = self.hmm_engine.predict_regime_filtered(
+                        _feat_df.values,
+                        timestamps=[pd.Timestamp(ts) for ts in _feat_df.index],
+                    )
+                    _rs: RegimeState = _states[-1]
+                    _startup_regime  = _rs.label
+                    _startup_conf    = _rs.probability
+                    _startup_stable  = _rs.is_confirmed
+                    _startup_notes   = [f"Predicted from last {len(_feat_df)} bars — awaiting first live update"]
+                    self._last_regime = _startup_regime
+                    # Warm up the incremental HMM filter so the first live
+                    # update() call has proper prior state instead of starting
+                    # cold and producing a garbage regime on bar 1.
+                    for _row in _feat_df.values:
+                        self.hmm_engine.update(
+                            new_feature_row = _row,
+                            timestamp       = None,
+                        )
+        except Exception as _exc:
+            logger.warning("Startup regime predict failed: %s", _exc)
+            _startup_notes = [f"Startup predict failed: {_exc}"]
+
+        _startup_signal = PortfolioSignal(
+            timestamp       = pd.Timestamp.now(),
+            regime          = _startup_regime,
+            confidence      = _startup_conf,
+            is_stable       = _startup_stable,
+            target_weights  = {},
+            delta_weights   = {},
+            leverage        = 1.0,
+            trading_allowed = True,
+            notes           = _startup_notes,
+        )
+        _startup_tf = broker_cfg.get("timeframe", "5Min")
+        self.dashboard.update(
+            snapshot       = port_snapshot,
+            signal         = _startup_signal,
+            drawdown_state = self.risk_manager.get_drawdown_state(),
+            system_status  = _initial_system,
+            market_open    = clock.is_open,
+            next_bar_dt    = _next_bar_close_utc(_startup_tf),
+            next_broker_dt = _next_bar_close_utc(_startup_tf),
+            next_hmm_dt    = self._last_retrain + dt.timedelta(days=7),
+            timeframe      = _startup_tf,
+            asset_group    = broker_cfg.get("asset_group", ""),
+            symbols        = symbols,
+        )
+
         # Register fill callback for logging
         def _on_fill(fill_event):
             self.trade_logger.log_fill(
@@ -888,6 +980,12 @@ class TradingSession:
             # ---- sleep until next bar close ---------------------------------
             next_close = _next_bar_close_utc(timeframe)
             wait_secs  = _seconds_until(next_close)
+            self.dashboard.update(
+                next_bar_dt    = next_close,
+                next_broker_dt = next_close,
+                next_hmm_dt    = self._last_retrain + dt.timedelta(days=7),
+                timeframe      = timeframe,
+            )
 
             if wait_secs > 10:
                 logger.debug(
@@ -1126,6 +1224,7 @@ class TradingSession:
             try:
                 port_snap = self.position_tracker.update(self._last_regime)  # REST refresh
                 from core.signal_generator import PortfolioSignal
+                from monitoring.dashboard import SystemStatus
                 portfolio_signal = PortfolioSignal(
                     timestamp       = pd.Timestamp.now(),
                     regime          = regime_state.label,
@@ -1136,10 +1235,30 @@ class TradingSession:
                     leverage        = 1.0,
                     trading_allowed = trading_state != TradingState.HALTED,
                 )
+                _sys_status = SystemStatus(
+                    data_ok          = True,
+                    api_ok           = True,
+                    api_latency_ms   = 0.0,
+                    hmm_last_trained = self.hmm_engine._training_date.to_pydatetime()
+                                       if getattr(self.hmm_engine, "_training_date", None) is not None else None,
+                    mode             = "PAPER" if self.config.get("broker", {}).get("paper_trading", True) else "LIVE",
+                )
+                try:
+                    _clock_open = self.client.get_clock().is_open
+                except Exception:
+                    _clock_open = None
+                _next_bar = _next_bar_close_utc(timeframe)
                 self.dashboard.update(
-                    snapshot = port_snap,
-                    signal   = portfolio_signal,
-                    event    = (
+                    snapshot       = port_snap,
+                    signal         = portfolio_signal,
+                    drawdown_state = self.risk_manager.get_drawdown_state(),
+                    system_status  = _sys_status,
+                    market_open    = _clock_open,
+                    next_bar_dt    = _next_bar,
+                    next_broker_dt = _next_bar,
+                    next_hmm_dt    = self._last_retrain + dt.timedelta(days=7),
+                    timeframe      = timeframe,
+                    event          = (
                         f"Bar {self._bar_count}: {regime_state.label}  "
                         f"p={confidence:.1%}  "
                         f"{'STABLE' if is_stable else 'PENDING'}"
@@ -1329,12 +1448,21 @@ def run_backtest(config: Dict, args: argparse.Namespace) -> None:
     step_size       = int(bt_cfg.get("step_size",         126))
     risk_free_rate  = float(bt_cfg.get("risk_free_rate",  0.045))
 
-    _print(f"\n[bold cyan]Regime Trader - Walk-Forward Backtest[/bold cyan]", console)
+    # Header — plain-English context about the run
+    _years = (pd.Timestamp(end_date) - pd.Timestamp(start_date)).days / 365.25
+    _train_mo = round(train_window / 21)
+    _test_mo  = round(test_window  / 21)
+    _sym_preview = ", ".join(symbols[:6])
+    _sym_extra   = f" … (+{len(symbols) - 6} more)" if len(symbols) > 6 else ""
+
+    _print(f"\n[bold cyan]Regime Trader — Walk-Forward Backtest[/bold cyan]", console)
     _print(
-        f"  Symbols  : {', '.join(symbols)}\n"
-        f"  Period   : {start_date}  ->  {end_date}\n"
+        f"  Symbols  : {_sym_preview}{_sym_extra}\n"
+        f"  Period   : {start_date}  →  {end_date}  ({_years:.1f} years)\n"
         f"  Capital  : ${initial_capital:,.0f}\n"
-        f"  IS/OOS   : {train_window} / {test_window} bars   step {step_size}",
+        f"  Method   : Walk-forward — train {_train_mo}m in-sample, "
+        f"test next {_test_mo}m out-of-sample, step forward, repeat\n"
+        f"  Note     : each fold's model is never trained on its own test data",
         console,
     )
 
@@ -1374,15 +1502,97 @@ def run_backtest(config: Dict, args: argparse.Namespace) -> None:
     hmm_config = {
         "n_candidates":      hmm_cfg_raw.get("n_candidates", [3, 4, 5]),
         "n_init":            hmm_cfg_raw.get("n_init", 10),
-        "min_train_bars":    120,
+        "min_train_bars":    hmm_cfg_raw.get("min_train_bars", 120),
         "stability_bars":    hmm_cfg_raw.get("stability_bars", 3),
         "flicker_window":    hmm_cfg_raw.get("flicker_window", 20),
         "flicker_threshold": hmm_cfg_raw.get("flicker_threshold", 4),
         "min_confidence":    hmm_cfg_raw.get("min_confidence", 0.55),
     }
     strategy_config = {"strategy": config.get("strategy", {})}
+    _strat = strategy_config["strategy"]
+
+    _print(
+        f"\n  [dim]HMM[/dim]\n"
+        f"  [dim]  States (candidates) : {hmm_config['n_candidates']}[/dim]\n"
+        f"  [dim]  Features            : {hmm_cfg_raw.get('features', ['log_return', 'realized_vol_5d', 'realized_vol_21d'])}[/dim]\n"
+        f"  [dim]  Min confidence      : {hmm_config['min_confidence']}[/dim]\n"
+        f"  [dim]  Stability bars      : {hmm_config['stability_bars']}  "
+        f"Flicker window: {hmm_config['flicker_window']}  "
+        f"Flicker threshold: {hmm_config['flicker_threshold']}[/dim]\n"
+        f"\n  [dim]Strategy[/dim]\n"
+        f"  [dim]  Allocation — low-vol: {_strat.get('low_vol_allocation', 0.95):.0%}  "
+        f"mid-vol (trend): {_strat.get('mid_vol_allocation_trend', 0.95):.0%}  "
+        f"mid-vol (no trend): {_strat.get('mid_vol_allocation_no_trend', 0.70):.0%}  "
+        f"high-vol: {_strat.get('high_vol_allocation', 0.70):.0%}[/dim]\n"
+        f"  [dim]  Leverage cap        : {_strat.get('low_vol_leverage', 1.25):.2f}x  "
+        f"Rebalance threshold: {_strat.get('rebalance_threshold', 0.15):.0%}  "
+        f"Trend lookback: {_strat.get('trend_lookback', 50)} bars[/dim]",
+        console,
+    )
+
+    def _make_bt_progress(n_syms: int) -> object:
+        """Return a fold-progress callback for bt.run()."""
+        from rich.text import Text
+
+        _W = 20
+        _ic = initial_capital  # capture for equity colour comparison
+
+        def _build_line(fold_id: int, n_total: int, phase: str, info: dict) -> Text:
+            if phase == "training":
+                pct = int(fold_id / n_total * 100)
+            else:
+                pct = int((fold_id + 1) / n_total * 100)
+
+            filled = pct * _W // 100
+            bar_text = Text()
+            bar_text.append("#" * filled, style="cyan")
+            bar_text.append("-" * (_W - filled), style="dim white")
+
+            line = Text()
+            line.append("  [")
+            line.append_text(bar_text)
+            line.append("] ")
+            line.append(f"{pct:3d}%", style="bold white")
+            line.append(f"  Fold {fold_id+1}/{n_total}  ")
+
+            if phase == "training":
+                line.append("Training ...", style="yellow")
+                line.append(
+                    f"  OOS {info['oos_start']} -> {info['oos_end']}", style="dim"
+                )
+            else:
+                line.append("OK ", style="bold green")
+                line.append(
+                    f"{info['oos_start']} -> {info['oos_end']}", style="green"
+                )
+                line.append(f"  {info['n_states']} states", style="dim cyan")
+                line.append(f"  {info['fold_trades']} tr", style="dim")
+                eq_style = (
+                    "bold green" if info["equity"] >= _ic else "bold red"
+                )
+                line.append(f"  ${info['equity']:>10,.0f}", style=eq_style)
+
+            return line
+
+        def _cb(fold_id: int, n_total: int, phase: str, info: dict) -> None:
+            if console is None:
+                return
+            line = _build_line(fold_id, n_total, phase, info)
+            end = "\r" if phase == "training" else "\n"
+            console.print(line, end=end, highlight=False, no_wrap=True, overflow="crop")
+
+        return _cb
 
     _print("\nRunning walk-forward backtest ...", console, style="dim")
+
+    # Silence noisy-but-normal log output during the backtest run.
+    # hmmlearn emits convergence warnings on every EM candidate that hits the
+    # iteration limit — expected behaviour, not an error.
+    # core.hmm_engine regime-change lines are INFO in live mode (dashboard handles
+    # visibility); suppress them here so the backtest output stays readable.
+    logging.getLogger("hmmlearn").setLevel(logging.ERROR)
+    logging.getLogger("core.hmm_engine").setLevel(logging.WARNING)
+
     bt = WalkForwardBacktester(
         symbols         = list(prices.columns),
         initial_capital = initial_capital,
@@ -1391,11 +1601,19 @@ def run_backtest(config: Dict, args: argparse.Namespace) -> None:
         step_size       = step_size,
         slippage_pct    = slippage_pct,
         risk_free_rate  = risk_free_rate,
-        zscore_window   = 60,
+        zscore_window       = int(config.get("backtest", {}).get("zscore_window",      60)),
+        sma_long            = int(config.get("backtest", {}).get("sma_long",           200)),
+        sma_trend           = int(config.get("backtest", {}).get("sma_trend",           50)),
+        volume_norm_window  = int(config.get("backtest", {}).get("volume_norm_window",  50)),
     )
 
     try:
-        result = bt.run(prices, hmm_config=hmm_config, strategy_config=strategy_config)
+        result = bt.run(
+            prices,
+            hmm_config=hmm_config,
+            strategy_config=strategy_config,
+            progress_callback=_make_bt_progress(len(list(prices.columns))),
+        )
     except Exception as exc:
         _print(f"[red]Backtest failed:[/red] {exc}", console)
         sys.exit(1)
@@ -1407,6 +1625,40 @@ def run_backtest(config: Dict, args: argparse.Namespace) -> None:
         f"  Final equity    : ${result.final_equity:,.2f}",
         console, style="dim",
     )
+
+    # ── Per-fold state count ──────────────────────────────────────────────────
+    _fold_states = [w.n_hmm_states for w in result.windows]
+    _state_counts = {}
+    for n in _fold_states:
+        _state_counts[n] = _state_counts.get(n, 0) + 1
+    _state_summary = "  ".join(
+        f"{n}-state × {c}" for n, c in sorted(_state_counts.items())
+    )
+    _print(
+        f"  HMM states used : {_state_summary}  "
+        f"(per fold: {', '.join(str(n) for n in _fold_states)})",
+        console, style="dim",
+    )
+
+    # ── Regime bar counts ─────────────────────────────────────────────────────
+    if len(result.combined_regimes) > 0:
+        _regime_counts = result.combined_regimes.value_counts().sort_index()
+        _total_bars = len(result.combined_regimes)
+        _label_order = [
+            "CRASH", "STRONG_BEAR", "BEAR", "WEAK_BEAR",
+            "NEUTRAL",
+            "WEAK_BULL", "BULL", "STRONG_BULL", "EUPHORIA",
+        ]
+        # sort by the canonical bear→bull order; unknown labels go at end
+        _sorted = sorted(
+            _regime_counts.items(),
+            key=lambda kv: (_label_order.index(kv[0]) if kv[0] in _label_order else 99),
+        )
+        _regime_lines = "".join(
+            f"\n    {lbl:<14} {bars:>5} bars  ({bars / _total_bars:>5.1%})"
+            for lbl, bars in _sorted
+        )
+        _print(f"  Regime counts  :{_regime_lines}", console, style="dim")
 
     _print("\n", console)
     pa = PerformanceAnalyzer(
@@ -1429,15 +1681,17 @@ def run_backtest(config: Dict, args: argparse.Namespace) -> None:
             price_df = pd.DataFrame(
                 {s: prices[s] for s in avail_syms}
             ).reindex(result.combined_equity.index).ffill().dropna(how="all")
-            bnh_equity = pa.compute_benchmark_bnh_multi(price_df, initial_capital)
-            sma_equity = pa.compute_benchmark_sma_multi(price_df, 200, initial_capital)
+            bnh_equity      = pa.compute_benchmark_bnh_multi(price_df, initial_capital)
+            sma_equity      = pa.compute_benchmark_sma_multi(price_df, 200, initial_capital)
+            ema_cross_equity = pa.compute_benchmark_ema_cross_multi(price_df, 9, 45, initial_capital)
             rand_mean, _ = pa.compute_random_allocation_benchmark_multi(
                 price_df, allocations=[0.60, 0.95], n_seeds=100,
                 initial_capital=initial_capital,
             )
         else:
-            bnh_equity = pa.compute_benchmark_bnh(bm_prices, initial_capital)
-            sma_equity = pa.compute_benchmark_sma(bm_prices, 200, initial_capital)
+            bnh_equity       = pa.compute_benchmark_bnh(bm_prices, initial_capital)
+            sma_equity       = pa.compute_benchmark_sma(bm_prices, 200, initial_capital)
+            ema_cross_equity = pa.compute_benchmark_ema_cross(bm_prices, 9, 45, initial_capital)
             underlying_ret     = bm_prices.pct_change().dropna()
             underlying_aligned = underlying_ret.reindex(
                 result.combined_returns.index
@@ -1447,12 +1701,15 @@ def run_backtest(config: Dict, args: argparse.Namespace) -> None:
                 initial_capital=initial_capital,
             )
 
-        eq_idx  = result.combined_equity.index
-        bnh_rpt = pa.analyze_equity_curve(
+        eq_idx       = result.combined_equity.index
+        bnh_rpt      = pa.analyze_equity_curve(
             bnh_equity.reindex(eq_idx).ffill().dropna()
         )
-        sma_rpt = pa.analyze_equity_curve(
+        sma_rpt      = pa.analyze_equity_curve(
             sma_equity.reindex(eq_idx).ffill().dropna()
+        )
+        ema_cross_rpt = pa.analyze_equity_curve(
+            ema_cross_equity.reindex(eq_idx).ffill().dropna()
         )
         rand_rpt_metrics = {
             "total_return": float(rand_mean.iloc[-1] / initial_capital - 1),
@@ -1466,7 +1723,7 @@ def run_backtest(config: Dict, args: argparse.Namespace) -> None:
         }
         _print_run_config(symbols, start_date, end_date, config, console)
         _print_comparison_table(
-            report, bnh_rpt, sma_rpt, rand_rpt_metrics, console,
+            report, bnh_rpt, sma_rpt, ema_cross_rpt, rand_rpt_metrics, console,
             n_symbols=len(symbols),
         )
 
@@ -1526,11 +1783,38 @@ def run_backtest(config: Dict, args: argparse.Namespace) -> None:
     }
     pd.Series(metrics).to_csv(output_dir / "performance_summary.csv", header=False)
 
+    _final_equity = result.final_equity
     _print(
         f"\n[green]Backtest complete.[/green]  "
         f"Total return: [bold]{report.total_return:+.2%}[/bold]  "
         f"Sharpe: [bold]{report.sharpe_ratio:.3f}[/bold]  "
         f"MaxDD: [bold]{report.max_drawdown:.2%}[/bold]",
+        console,
+    )
+
+    # Plain-English interpretation of the key numbers
+    _sharpe_grade = (
+        "strong risk-adjusted return"        if report.sharpe_ratio >= 1.0  else
+        "acceptable risk-adjusted return"    if report.sharpe_ratio >= 0.5  else
+        "below benchmark — marginal edge"    if report.sharpe_ratio >= 0.0  else
+        "negative — strategy lost money on a risk-adjusted basis"
+    )
+    _dd_note = (
+        "within normal range for an equity strategy"  if abs(report.max_drawdown) <= 0.20 else
+        "significant — account lost over 20% at its worst"
+    )
+    _cagr_str  = f"{report.cagr:+.1%}" if report.cagr is not None else "N/A"
+    _years_str = f"{_years:.1f}"
+    _print(
+        f"\n  [dim]Interpretation[/dim]\n"
+        f"  [dim]  ${initial_capital:,.0f}  →  ${_final_equity:,.0f}  "
+        f"over {_years_str} years   (CAGR {_cagr_str} / year)[/dim]\n"
+        f"  [dim]  Sharpe {report.sharpe_ratio:.3f} — {_sharpe_grade}[/dim]\n"
+        f"  [dim]  Max Drawdown {report.max_drawdown:.1%} — {_dd_note}[/dim]\n"
+        f"  [dim]  {result.metadata['total_trades']} trades across "
+        f"{result.metadata['n_folds']} out-of-sample folds "
+        f"(~{int(result.metadata['total_trades'] / max(_years, 1))} trades/year)[/dim]\n"
+        f"  [dim]  All results are out-of-sample — no lookahead bias[/dim]",
         console,
     )
 

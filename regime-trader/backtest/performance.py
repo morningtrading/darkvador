@@ -777,6 +777,78 @@ class PerformanceAnalyzer:
         equity = initial_capital * (1.0 + port_ret).cumprod()
         return equity.rename("sma_equity")
 
+    def compute_benchmark_ema_cross(
+        self,
+        prices: pd.Series,
+        fast: int = 9,
+        slow: int = 45,
+        initial_capital: float = 100_000.0,
+    ) -> pd.Series:
+        """
+        EMA crossover equity: long when fast EMA > slow EMA, else cash.
+
+        Signals are 1-bar delayed (no look-ahead).
+
+        Parameters
+        ----------
+        prices :
+            Close prices.
+        fast :
+            Fast EMA period (default 9).
+        slow :
+            Slow EMA period (default 45).
+        initial_capital :
+            Starting equity.
+
+        Returns
+        -------
+        Equity curve.
+        """
+        ema_fast = prices.ewm(span=fast, adjust=False).mean()
+        ema_slow = prices.ewm(span=slow, adjust=False).mean()
+        invested  = (ema_fast > ema_slow).astype(float).shift(1).fillna(0.0)
+        daily_ret = prices.pct_change().fillna(0.0)
+        strat_ret = invested * daily_ret
+        equity    = initial_capital * (1.0 + strat_ret).cumprod()
+        return equity.rename("ema_cross_equity")
+
+    def compute_benchmark_ema_cross_multi(
+        self,
+        prices_df: pd.DataFrame,
+        fast: int = 9,
+        slow: int = 45,
+        initial_capital: float = 100_000.0,
+    ) -> pd.Series:
+        """
+        Equal-weighted EMA crossover equity across multiple symbols.
+
+        Each symbol is long when its fast EMA > slow EMA, else cash.
+        Signals are 1-bar delayed (no look-ahead).
+
+        Parameters
+        ----------
+        prices_df :
+            DataFrame of close prices, one column per symbol.
+        fast :
+            Fast EMA period (default 9).
+        slow :
+            Slow EMA period (default 45).
+        initial_capital :
+            Starting equity.
+
+        Returns
+        -------
+        Equity curve.
+        """
+        n_syms    = prices_df.shape[1]
+        daily_ret = prices_df.pct_change().fillna(0.0)
+        ema_fast  = prices_df.ewm(span=fast,  adjust=False).mean()
+        ema_slow  = prices_df.ewm(span=slow,  adjust=False).mean()
+        invested  = (ema_fast > ema_slow).astype(float).shift(1).fillna(0.0)
+        port_ret  = (invested * daily_ret).sum(axis=1) / n_syms
+        equity    = initial_capital * (1.0 + port_ret).cumprod()
+        return equity.rename("ema_cross_equity")
+
     def compute_random_allocation_benchmark_multi(
         self,
         prices_df: pd.DataFrame,

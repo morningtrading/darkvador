@@ -1,10 +1,10 @@
 {
-  "session_start": "2026-04-12T09:29:46.193701+00:00",
-  "session_end": "2026-04-12T09:30:21.204351+00:00",
-  "regime": "UNKNOWN",
-  "bar_count": 0,
+  "session_start": "2026-04-13T20:25:38.272342+00:00",
+  "session_end": "2026-04-14T06:15:13.529612+00:00",
+  "regime": "NEUTRAL",
+  "bar_count": 3,
   "trade_count": 0,
-  "equity_at_start": 100000.0,
-  "equity_at_end": 100000.0,
+  "equity_at_start": 100015.67,
+  "equity_at_end": 100125.63,
   "model_path": "C:\\Users\\espac\\localrepo\\regime-trader\\models\\hmm.pkl"
 }

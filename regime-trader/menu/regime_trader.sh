@@ -56,9 +56,73 @@ print_menu() {
     echo -e "  ${YELLOW}── Asset Groups ────────────────────────────${RESET}"
     echo -e "  ${BLUE}[g]${RESET}  Change Group     ${DIM}(stocks | crypto | indices)${RESET}"
     echo ""
+    echo -e "  ${YELLOW}── Source Control ──────────────────────────${RESET}"
+    echo -e "  ${MAGENTA}[s]${RESET}  Save & Push      ${DIM}(git commit all changes + push to GitHub)${RESET}"
+    echo ""
     echo -e "  ${RED}[q]${RESET}  Quit"
     echo ""
     echo -e "  ${DIM}─────────────────────────────────────────${RESET}"
+}
+
+git_save() {
+    echo ""
+    echo -e "  ${CYAN}Current git status:${RESET}"
+    echo ""
+    git -C "$ROOT" status --short | sed 's/^/    /'
+    echo ""
+
+    # ── nothing to commit? ──────────────────────────────────────
+    local has_changes
+    has_changes=$(git -C "$ROOT" status --porcelain)
+    if [ -z "$has_changes" ]; then
+        echo -e "  ${GREEN}Working tree clean — nothing to commit.${RESET}"
+        echo ""
+        read -rp "  Push existing commits to GitHub anyway? [y/N]: " push_yn
+        if [[ "$push_yn" =~ ^[Yy]$ ]]; then
+            echo ""
+            git -C "$ROOT" push origin main 2>&1 | sed 's/^/    /'
+        fi
+        return
+    fi
+
+    # ── prompt for commit message ───────────────────────────────
+    local default_msg
+    default_msg="update: $(date '+%Y-%m-%d %H:%M')"
+    echo -e "  ${YELLOW}Commit message${RESET}  ${DIM}(press Enter to use: \"$default_msg\")${RESET}"
+    read -rp "  > " commit_msg
+    [ -z "$commit_msg" ] && commit_msg="$default_msg"
+
+    echo ""
+    echo -e "  ${DIM}Staging all changes...${RESET}"
+    git -C "$ROOT" add -A
+
+    echo -e "  ${DIM}Committing...${RESET}"
+    git -C "$ROOT" commit -m "$commit_msg"
+    local commit_rc=$?
+    echo ""
+
+    if [ $commit_rc -ne 0 ]; then
+        echo -e "  ${RED}Commit failed (exit $commit_rc) — not pushing.${RESET}"
+        return
+    fi
+
+    echo -e "  ${GREEN}Committed.${RESET}"
+    echo ""
+
+    # ── confirm push ────────────────────────────────────────────
+    read -rp "  Push to GitHub (origin/main)? [Y/n]: " push_yn
+    if [[ ! "$push_yn" =~ ^[Nn]$ ]]; then
+        echo ""
+        echo -e "  ${DIM}Pushing to origin/main...${RESET}"
+        git -C "$ROOT" push origin main 2>&1 | sed 's/^/    /'
+        local push_rc=${PIPESTATUS[0]}
+        echo ""
+        if [ $push_rc -eq 0 ]; then
+            echo -e "  ${GREEN}Pushed successfully to origin/main.${RESET}"
+        else
+            echo -e "  ${RED}Push failed (exit $push_rc) — check credentials or network.${RESET}"
+        fi
+    fi
 }
 
 select_group() {
@@ -146,6 +210,11 @@ while true; do
             run_command \
                 "Rolling WFO — group: $ASSET_GROUP  (6m tune / 3m test)" \
                 "py -3.12 tools/rolling_wfo.py --asset-group $ASSET_GROUP --start 2020-01-01 --tune-months 12 --test-months 3 --step-months 3"
+            ;;
+        s|S)
+            git_save
+            echo ""
+            read -rp "  Press Enter to return to menu..."
             ;;
         g|G)
             select_group

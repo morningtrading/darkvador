@@ -57,7 +57,7 @@ hmm:
   - 7
   n_init: 10
   covariance_type: full
-  min_train_bars: 37
+  min_train_bars: 252
   stability_bars: 5
   flicker_window: 20
   flicker_threshold: 2
@@ -69,8 +69,8 @@ hmm:
 strategy:
   low_vol_allocation: 0.95
   mid_vol_allocation_trend: 0.95
-  mid_vol_allocation_no_trend: 0.6
-  high_vol_allocation: 0.6
+  mid_vol_allocation_no_trend: 0.70
+  high_vol_allocation: 0.70
   low_vol_leverage: 1.25
   rebalance_threshold: 0.15
   uncertainty_size_mult: 0.5
@@ -91,9 +91,9 @@ risk:
 backtest:
   initial_capital: 100000
   slippage_pct: 0.0005
-  train_window: 42
-  test_window: 21
-  step_size: 21
+  train_window: 252
+  test_window: 126
+  step_size: 126
   risk_free_rate: 0.045
   benchmark_symbol: SPY
   commission_per_share: 0.0

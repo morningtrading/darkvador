@@ -304,6 +304,7 @@ class FeatureEngineer:
         rsi_period: int = 14,
         sma_long: int = 200,
         sma_trend: int = 50,
+        volume_norm_window: int = 50,
     ) -> None:
         self.zscore_window = zscore_window
         self.vol_window = vol_window
@@ -311,6 +312,7 @@ class FeatureEngineer:
         self.rsi_period = rsi_period
         self.sma_long = sma_long
         self.sma_trend = sma_trend
+        self.volume_norm_window = volume_norm_window
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
@@ -346,7 +348,7 @@ class FeatureEngineer:
         raw["vol_ratio"] = compute_vol_ratio(close, 5, self.vol_window)
 
         # ── Volume ────────────────────────────────────────────────────────────
-        raw["volume_norm"] = compute_normalized_volume(volume, 50)
+        raw["volume_norm"] = compute_normalized_volume(volume, self.volume_norm_window)
         raw["volume_trend"] = compute_volume_trend(volume, 10, 10)
 
         # ── Trend ─────────────────────────────────────────────────────────────

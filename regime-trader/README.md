@@ -205,17 +205,73 @@ Each order carries a unique `client_order_id` in the format `{uuid8}-{SYMBOL}-{s
 
 ---
 
+## Strategy — entry, sizing, and exit
+
+The strategy is **always long**. It never shorts and never moves entirely to cash. The entire edge is **drawdown avoidance through position sizing**: being 60% invested during a crash rather than 95% is what separates this from buy-and-hold.
+
+### Entry
+
+There is no traditional entry trigger (no crossover, no breakout). The position is opened as soon as the HMM first produces a confirmed regime. After that the portfolio is rebalanced every bar that the regime changes or the EMA filter flips — not on a fixed schedule.
+
+### Position sizing by regime
+
+| Regime | Condition | Portfolio deployed | Leverage |
+|---|---|---|---|
+| **Low vol** | Calmest HMM state | 95% | 1.25× |
+| **Mid vol — trend intact** | Price above 50 EMA | 95% | 1.0× |
+| **Mid vol — no trend** | Price below 50 EMA | 60% | 1.0× |
+| **High vol** | Most volatile HMM state | 60% | 1.0× |
+
+Allocation is split equally across all symbols in the universe (e.g. 95% ÷ 10 symbols = 9.5% per symbol).
+
+### Uncertainty discount
+
+If the HMM posterior probability is below 0.55, or the regime is flickering (too many flips in a short window), or the new state is not yet confirmed (< `stability_bars` consecutive bars), **all position sizes are halved and leverage is dropped to 1.0×**. This is a soft exit — the system stays invested but at half size until the HMM is confident again.
+
+### Stop loss
+
+Every signal carries a stop computed fresh from the current bar's ATR and EMA:
+
+| Regime | Stop formula |
+|---|---|
+| Low vol | `max(price − 3×ATR,  50EMA − 0.5×ATR)` |
+| Mid vol | `50EMA − 0.5×ATR` |
+| High vol | `50EMA − 1.0×ATR` |
+
+The stop floats upward with the EMA as the market rises — it is a trailing stop, not a fixed level.
+
+### Exit / size reduction
+
+A full or partial size reduction is triggered by any of:
+
+1. **Regime transition to higher vol** — the orchestrator immediately rebalances to the new target weight (e.g. 95% → 60% when low-vol shifts to high-vol)
+2. **Confidence drops below threshold** — uncertainty discount applied (size halved)
+3. **Stop-loss hit** — the risk manager closes the position at the stop price
+4. **Risk circuit breaker** — daily / weekly drawdown limits force a size reduction or full halt (see Risk controls section)
+
+There is no take-profit target. Positions are held open-ended until one of the above triggers fires.
+
+### Rebalance filter
+
+A rebalance is skipped if the new target weight is within 10% (relative) of the current weight. This prevents constant micro-trades when the regime is stable:
+
+```
+|new_weight − current_weight| < 0.10 × new_weight  →  skip
+```
+
+---
+
 ## Walk-forward backtesting
 
 The backtester uses a strict walk-forward methodology to prevent look-ahead bias:
 
-- **In-sample window**: 252 bars (~1 year) — HMM fitted here
-- **Out-of-sample window**: 126 bars (~6 months) — strategy evaluated here
-- **Step size**: 126 bars — windows slide forward each fold
+- **In-sample window**: configured per run — HMM fitted and parameters selected here
+- **Out-of-sample window**: never seen during tuning — strategy evaluated here
+- **Step size**: equal to the OOS window (non-overlapping test periods)
 - Equity is carried forward between folds (compounding)
 - Slippage: 5 bps round-trip per trade
 
-Performance metrics reported per fold and overall: CAGR, Sharpe ratio, max drawdown, annualised volatility, regime breakdown, and comparison to buy-and-hold benchmark.
+Performance metrics reported per fold and overall: CAGR, Sharpe ratio, max drawdown, annualised volatility, regime breakdown (% time, entries, average duration per regime), regime change count, transition matrix, and comparison to buy-and-hold and SMA-200 benchmarks.
 
 ---
 
@@ -248,15 +304,16 @@ py -3.12 tools/rolling_wfo.py --asset-group stocks --start 2020-01-01
 The gold-standard validation. For each fold:
 
 ```
-│← tune 6 months →│← test 3 months (blind) →│
-                  │← tune 6 months →│← test 3 months →│
-                                    │← tune 6 months →│← test →│
+│←────── tune 12 months ──────→│← test 3 months (blind) →│
+                  │←────── tune 12 months ──────→│← test 3 months →│
+                                    │←────── tune 12 months ──────→│← test →│
                                                        ...
 ```
 
-- **Tune phase**: runs all parameter variants on the tune window; selects the winner by Sharpe
-- **Test phase**: applies the winning params to the next 3 months — data never used during tuning
-- **Advances** by 3 months and repeats until today (~17 folds from 2020)
+- **Tune phase**: runs all parameter variants on the 12-month tune window; selects the winner by Sharpe
+- **Test phase**: applies the winning params blind to the next 3 months — data never seen during tuning
+- **Advances** by 3 months and repeats until today (~22 folds from 2020)
+- **4:1 ratio** (12m tune / 3m test) is the professional WFO standard
 
 #### What the WFO output tells you
 
@@ -287,11 +344,12 @@ Every 3 months:
 |---|---|---|
 | `--asset-group` | stocks | Asset group to test |
 | `--start` | 2020-01-01 | First fold start date |
-| `--tune-months` | 6 | Tuning window length |
+| `--tune-months` | 12 | Tuning window length |
 | `--test-months` | 3 | Blind test window length |
 | `--step-months` | 3 | How far to advance each fold |
+| `--show-windows` | — | Print fold schedule and bar counts without running backtests |
 
-> **Runtime**: approximately 1.5–2 min per run × `n_variants` × `n_folds`. With default settings (9 variants, ~17 folds from 2020) expect 4–5 hours on a standard machine. Run overnight.
+> **Runtime**: approximately 1.5–2 min per run × `n_variants` × `n_folds`. With default settings (9 variants, ~22 folds from 2020) expect 5–6 hours on a standard machine. Run overnight.
 
 ---
 
@@ -323,8 +381,21 @@ Historical bars are fetched from Alpaca's `StockHistoricalDataClient` and cached
 | Feature | Description |
 |---|---|
 | `log_return` | Log of close[t] / close[t-1] |
-| `realized_vol_5d` | Rolling 5-bar standard deviation of log returns |
-| `realized_vol_21d` | Rolling 21-bar standard deviation of log returns |
+| `realized_vol_5d` | Rolling 5-bar std dev of log returns |
+| `realized_vol_21d` | Rolling 21-bar std dev of log returns |
+| `vol_ratio` | `realized_vol_5d / realized_vol_21d` — vol regime indicator |
+| `vol_of_vol` | Rolling std dev of `realized_vol_21d` — second-order vol |
+| `volume_norm` | Volume / rolling mean volume — relative activity |
+| `dist_sma200` | (price − SMA200) / SMA200 — distance from long-term trend |
+| `sma50_slope` | Rate of change of SMA50 over a short window — trend momentum |
+| `high_low_range` | (high − low) / close — intraday range normalised |
+| `close_position` | (close − low) / (high − low) — close position in the bar |
+| `overnight_gap` | open[t] / close[t-1] − 1 — gap risk |
+| `parkinson_vol` | Parkinson high-low volatility estimator |
+| `garman_klass_vol` | Garman-Klass OHLC volatility estimator |
+| `amihud_illiquidity` | \|log_return\| / volume — illiquidity proxy |
+
+All raw features are then z-scored over a rolling window before being fed to the HMM, so the model sees standardised inputs regardless of the absolute level of volatility.
 
 Live streaming uses `StockDataStream` (market data) and `TradingStream` (order fills), both running as async coroutines in background daemon threads.
 
