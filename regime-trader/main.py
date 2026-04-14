@@ -43,13 +43,42 @@ logger = logging.getLogger("main")
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
 
-_ROOT         = Path(__file__).resolve().parent
-_MODEL_PATH   = _ROOT / "models" / "hmm.pkl"
-_SNAPSHOT_PATH = _ROOT / "state_snapshot.json"
+_ROOT              = Path(__file__).resolve().parent
+_MODEL_PATH        = _ROOT / "models" / "hmm.pkl"
+_SNAPSHOT_PATH     = _ROOT / "state_snapshot.json"
 _MODEL_MAX_AGE_DAYS = 7
+_SAVED_RESULTS_DIR = _ROOT / "savedresults"
 
 # ── HMM feature helper (defined in data/feature_engineering.py) ───────────────
 from data.feature_engineering import hmm_feature_names as _hmm_feature_names
+
+
+# ── Saved-results helpers ──────────────────────────────────────────────────────
+
+def _saved_results_backtest_dir() -> Path:
+    """Return a timestamped subdirectory under savedresults/ for one backtest run."""
+    ts = dt.datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    d = _SAVED_RESULTS_DIR / f"backtest_{ts}"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _save_training_log(engine, symbols: List[str], hmm_cfg: Dict) -> None:
+    """Append one row to savedresults/training_log.csv after each HMM training."""
+    _SAVED_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    log_path = _SAVED_RESULTS_DIR / "training_log.csv"
+    row = {
+        "timestamp":   dt.datetime.now().isoformat(timespec="seconds"),
+        "n_states":    engine._n_states,
+        "bic":         round(engine._training_bic, 4),
+        "n_bars":      getattr(engine, "_n_train_bars", 0),
+        "features":    "|".join(_hmm_feature_names(hmm_cfg)),
+        "extended":    hmm_cfg.get("extended_features", True),
+        "symbols":     ",".join(symbols),
+    }
+    write_header = not log_path.exists()
+    pd.DataFrame([row]).to_csv(log_path, mode="a", header=write_header, index=False)
+    logger.info("Training log appended to %s", log_path)
 
 
 # ── Config helpers ─────────────────────────────────────────────────────────────
@@ -504,6 +533,7 @@ def _train_hmm(
         min_train_bars     = hmm_cfg.get("min_train_bars", 252),
     )
     engine.fit(features_clean.values)
+    engine._n_train_bars = len(features_clean)   # stored for logging
     engine.save(str(_MODEL_PATH))
 
     _print(
@@ -1445,8 +1475,9 @@ def run_backtest(config: Dict, args: argparse.Namespace) -> None:
     bt_cfg = config.get("backtest", {})
     start_date: str = args.start or "2018-01-01"
     end_date: str   = args.end   or pd.Timestamp.today().strftime("%Y-%m-%d")
-    output_dir      = Path(args.output)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    output_dir      = _saved_results_backtest_dir()
+    # keep legacy results/ dir in sync for tools that read from it
+    Path(args.output).mkdir(parents=True, exist_ok=True)
 
     initial_capital = float(bt_cfg.get("initial_capital", 100_000))
     slippage_pct    = float(bt_cfg.get("slippage_pct",    0.0005))
@@ -1898,6 +1929,7 @@ def run_train_only(config: Dict, args: Optional[argparse.Namespace] = None) -> N
     client.connect_with_retry(max_attempts=3, base_delay=2.0)
 
     engine = _train_hmm(client, symbols, hmm_cfg, console=console, n_bars=756)
+    _save_training_log(engine, symbols, hmm_cfg)
     _print(
         f"\n[green]Training complete.[/green]  "
         f"states={engine._n_states}  BIC={engine._training_bic:.2f}  "
