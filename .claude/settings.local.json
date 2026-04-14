@@ -12,7 +12,12 @@
       "Bash(.venv/Scripts/python.exe -c ':*)",
       "Read(//c/Users/espac/.claude/projects/c--Users-espac-localrepo/c7864594-cc4e-4f84-84ed-598e4c4ff418/tool-results/**)",
       "Bash(.venv/Scripts/python.exe -m pytest tests/test_hmm.py tests/test_look_ahead.py tests/test_strategies.py -v --tb=short -q)",
-      "Bash(py -3.12 -c ':*)"
+      "Bash(py -3.12 -c ':*)",
+      "Bash(wc -l /c/Users/espac/localrepo/regime-trader/core/*.py /c/Users/espac/localrepo/regime-trader/broker/*.py /c/Users/espac/localrepo/regime-trader/data/*.py /c/Users/espac/localrepo/regime-trader/backtest/*.py /c/Users/espac/localrepo/regime-trader/monitoring/*.py)",
+      "Bash(py -3.12 main.py trade --train-only)",
+      "Bash(py -3.12 main.py trade --train-only --asset-group stocks)",
+      "Bash(py -3.12 main.py backtest --asset-group stocks --start 2020-01-01 --compare)",
+      "Bash(PYTHONIOENCODING=utf-8 py -3.12 main.py backtest --asset-group stocks --start 2020-01-01 --compare)"
     ]
   }
 }
