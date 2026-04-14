@@ -62,10 +62,10 @@ hmm:
   flicker_window: 20
   flicker_threshold: 2
   min_confidence: 0.7
+  extended_features: true   # true (default): adds vol_ratio, adx_14, dist_sma200 — set false to revert to base only
   features:
-  - log_return
-  - realized_vol_5d
-  - realized_vol_21d
+  - log_ret_1
+  - realized_vol_20
 strategy:
   low_vol_allocation: 0.95
   mid_vol_allocation_trend: 0.95

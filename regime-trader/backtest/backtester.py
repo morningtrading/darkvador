@@ -34,7 +34,7 @@ import pandas as pd
 
 from core.hmm_engine import HMMEngine
 from core.regime_strategies import StrategyOrchestrator
-from data.feature_engineering import FeatureEngineer
+from data.feature_engineering import FeatureEngineer, hmm_feature_names as _hmm_feature_names
 
 logger = logging.getLogger(__name__)
 
@@ -251,7 +251,11 @@ class WalkForwardBacktester:
             sma_trend=self.sma_trend,
             volume_norm_window=self.volume_norm_window,
         )
-        full_features_raw = fe.build_feature_matrix(ohlcv[market_sym], dropna=False)
+        full_features_raw = fe.build_feature_matrix(
+            ohlcv[market_sym],
+            feature_names=_hmm_feature_names(hmm_cfg),
+            dropna=False,
+        )
 
         # ── Identify clean rows (all features non-NaN) ────────────────────────
         clean_mask = full_features_raw.notna().all(axis=1)

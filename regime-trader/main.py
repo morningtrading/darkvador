@@ -48,6 +48,9 @@ _MODEL_PATH   = _ROOT / "models" / "hmm.pkl"
 _SNAPSHOT_PATH = _ROOT / "state_snapshot.json"
 _MODEL_MAX_AGE_DAYS = 7
 
+# ── HMM feature helper (defined in data/feature_engineering.py) ───────────────
+from data.feature_engineering import hmm_feature_names as _hmm_feature_names
+
 
 # ── Config helpers ─────────────────────────────────────────────────────────────
 
@@ -481,8 +484,9 @@ def _train_hmm(
         sym_bars["volume"] = 1_000_000.0
 
     fe = FeatureEngineer()
-    features_df = fe.compute(sym_bars)
-    features_clean = features_df.dropna()
+    features_clean = fe.build_feature_matrix(
+        sym_bars, feature_names=_hmm_feature_names(hmm_cfg)
+    )
 
     if len(features_clean) < hmm_cfg.get("min_train_bars", 252):
         raise RuntimeError(
@@ -866,7 +870,9 @@ class TradingSession:
                 from data.feature_engineering import FeatureEngineer
                 from core.hmm_engine import RegimeState
                 _fe      = FeatureEngineer()
-                _feat_df = _fe.compute(_ref_df).dropna()
+                _feat_df = _fe.build_feature_matrix(
+                    _ref_df, feature_names=_hmm_feature_names(hmm_cfg)
+                )
                 if len(_feat_df) < 10:
                     _startup_notes = [f"Startup predict: only {len(_feat_df)} clean feature rows (need 10)"]
                 else:
@@ -1029,8 +1035,9 @@ class TradingSession:
             try:
                 from data.feature_engineering import FeatureEngineer
                 fe = FeatureEngineer()
-                features_df    = fe.compute(ref_bars)
-                features_clean = features_df.dropna()
+                features_clean = fe.build_feature_matrix(
+                    ref_bars, feature_names=_hmm_feature_names(hmm_cfg)
+                )
                 if len(features_clean) < 10:
                     logger.warning("Too few clean feature rows -- skipping bar")
                     continue

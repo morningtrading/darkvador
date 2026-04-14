@@ -50,6 +50,28 @@ FEATURE_COLUMNS: List[str] = [
     "norm_atr_14",
 ]
 
+# ── HMM feature presets (referenced by main.py and backtester.py) ─────────────
+# Toggle via hmm.extended_features in settings.yaml.
+HMM_BASE_FEATURES: List[str] = [
+    "log_ret_1",
+    "realized_vol_20",
+]
+HMM_EXTENDED_FEATURES: List[str] = [
+    "log_ret_1",
+    "realized_vol_20",
+    "vol_ratio",
+    "adx_14",
+    "dist_sma200",
+]
+
+
+def hmm_feature_names(hmm_cfg: dict) -> List[str]:
+    """Return the feature list to feed the HMM based on settings."""
+    if hmm_cfg.get("extended_features", True):
+        return HMM_EXTENDED_FEATURES
+    return HMM_BASE_FEATURES
+
+
 # ── Pure helper functions (no class state) ────────────────────────────────────
 
 
