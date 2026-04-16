@@ -1,0 +1,16 @@
+# balanced.yaml — fixes the main issues while staying near full deployment
+# Only overrides that differ from config/settings.yaml base.
+
+hmm:
+  n_candidates: [3, 4, 5, 6]    # drop 7-state (overfits on daily data)
+  stability_bars: 7              # ~1.5 weeks to confirm
+  flicker_threshold: 4           # reasonable tolerance
+  min_confidence: 0.62           # realistic for 4-6 state HMM
+
+strategy:
+  mid_vol_allocation_no_trend: 0.70
+  high_vol_allocation:         0.60   # defensive but not paralysed
+  rebalance_threshold:         0.18   # fewer spurious rebalances
+
+backtest:
+  slippage_pct: 0.0010           # 10 bps per side

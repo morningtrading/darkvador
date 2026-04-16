@@ -22,6 +22,16 @@ RESET='\033[0m'
 # ── active asset group (default: stocks) ─────────────────────
 ASSET_GROUP="stocks"
 
+# ── active config set ─────────────────────────────────────────
+ACTIVE_SET_FILE="$ROOT/config/active_set"
+get_active_set() {
+    if [ -f "$ACTIVE_SET_FILE" ]; then
+        cat "$ACTIVE_SET_FILE" | tr -d '[:space:]'
+    else
+        echo "base"
+    fi
+}
+
 print_header() {
     clear
     echo -e "${CYAN}"
@@ -32,6 +42,7 @@ print_header() {
     echo -e "${RESET}"
     echo -e "  ${DIM}Working directory: $ROOT${RESET}"
     echo -e "  ${YELLOW}Active group : ${CYAN}${ASSET_GROUP}${RESET}  ${DIM}(change with g)${RESET}"
+    echo -e "  ${YELLOW}Config set   : ${MAGENTA}$(get_active_set)${RESET}  ${DIM}(change with c)${RESET}"
     echo ""
 }
 
@@ -48,6 +59,9 @@ print_menu() {
     echo -e "  ${GREEN}[6]${RESET}  Forward Test     ${DIM}(hold-out 2024-today, out-of-sample)${RESET}"
     echo ""
     echo -e "  ${GREEN}[8]${RESET}  Train + Backtest ${DIM}(retrain HMM then full benchmark, active group)${RESET}"
+    echo ""
+    echo -e "  ${YELLOW}── Config Sets ─────────────────────────────${RESET}"
+    echo -e "  ${MAGENTA}[c]${RESET}  Config Set       ${DIM}(conservative | balanced | aggressive)${RESET}"
     echo ""
     echo -e "  ${YELLOW}── Asset Groups ────────────────────────────${RESET}"
     echo -e "  ${BLUE}[g]${RESET}  Change Group     ${DIM}(stocks | crypto | indices)${RESET}"
@@ -119,6 +133,31 @@ git_save() {
             echo -e "  ${RED}Push failed (exit $push_rc) — check credentials or network.${RESET}"
         fi
     fi
+}
+
+select_set() {
+    echo ""
+    echo -e "  ${YELLOW}Select config set:${RESET}"
+    echo -e "  ${MAGENTA}[1]${RESET}  conservative  ${DIM}(capital preservation, no leverage, low churn)${RESET}"
+    echo -e "  ${MAGENTA}[2]${RESET}  balanced      ${DIM}(fixes churn issues, realistic slippage — recommended)${RESET}"
+    echo -e "  ${MAGENTA}[3]${RESET}  aggressive    ${DIM}(max deployment, 1.5x leverage, responsive)${RESET}"
+    echo -e "  ${MAGENTA}[4]${RESET}  base          ${DIM}(raw settings.yaml, no overrides)${RESET}"
+    echo ""
+    read -rp "  Your choice: " schoice
+    case "$schoice" in
+        1) NEW_SET="conservative" ;;
+        2) NEW_SET="balanced"     ;;
+        3) NEW_SET="aggressive"   ;;
+        4) NEW_SET="base"         ;;
+        *) echo -e "  ${RED}Invalid — keeping '$(get_active_set)'${RESET}" ; sleep 1 ; return ;;
+    esac
+    if [ "$NEW_SET" = "base" ]; then
+        echo -n "" > "$ACTIVE_SET_FILE"
+    else
+        echo "$NEW_SET" > "$ACTIVE_SET_FILE"
+    fi
+    echo -e "  ${GREEN}Config set switched to: $NEW_SET${RESET}"
+    sleep 1
 }
 
 select_group() {
@@ -206,6 +245,9 @@ while true; do
             git_save
             echo ""
             read -rp "  Press Enter to return to menu..."
+            ;;
+        c|C)
+            select_set
             ;;
         g|G)
             select_group

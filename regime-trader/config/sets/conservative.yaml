@@ -1,0 +1,25 @@
+# conservative.yaml — low-churn, capital-preservation profile
+# Only overrides that differ from config/settings.yaml base.
+
+hmm:
+  n_candidates: [3, 4, 5]        # fewer candidates → faster, less overfit
+  stability_bars: 9              # 9 bars (~2 weeks) to confirm regime flip
+  flicker_threshold: 5           # tolerate up to 5 changes in 20 bars
+  min_confidence: 0.60           # realistic floor for 4-5 state HMM
+
+strategy:
+  low_vol_allocation:         0.90
+  mid_vol_allocation_trend:   0.85
+  mid_vol_allocation_no_trend: 0.60
+  high_vol_allocation:        0.45   # genuinely defensive
+  low_vol_leverage:           1.0    # no leverage
+  rebalance_threshold:        0.25   # only rebalance on large drifts
+
+risk:
+  max_leverage:       1.0
+  daily_dd_halt:      0.025
+  weekly_dd_halt:     0.06
+  max_dd_from_peak:   0.08
+
+backtest:
+  slippage_pct: 0.0010           # 10 bps per side — more realistic

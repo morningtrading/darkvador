@@ -48,6 +48,8 @@ _MODEL_PATH        = _ROOT / "models" / "hmm.pkl"
 _SNAPSHOT_PATH     = _ROOT / "state_snapshot.json"
 _MODEL_MAX_AGE_DAYS = 7
 _SAVED_RESULTS_DIR = _ROOT / "savedresults"
+_SETS_DIR          = _ROOT / "config" / "sets"
+_ACTIVE_SET_FILE   = _ROOT / "config" / "active_set"
 
 # ── HMM feature helper (defined in data/feature_engineering.py) ───────────────
 from data.feature_engineering import hmm_feature_names as _hmm_feature_names
@@ -83,13 +85,51 @@ def _save_training_log(engine, symbols: List[str], hmm_cfg: Dict) -> None:
 
 # ── Config helpers ─────────────────────────────────────────────────────────────
 
-def load_config(config_path: str = "config/settings.yaml") -> Dict:
-    """Load the YAML settings file and return it as a nested dict."""
+def _deep_merge(base: Dict, overrides: Dict) -> Dict:
+    """Recursively merge overrides into base, returning a new dict."""
+    result = base.copy()
+    for key, val in overrides.items():
+        if key in result and isinstance(result[key], dict) and isinstance(val, dict):
+            result[key] = _deep_merge(result[key], val)
+        else:
+            result[key] = val
+    return result
+
+
+def load_config(config_path: str = "config/settings.yaml",
+                set_name: Optional[str] = None) -> Dict:
+    """
+    Load base settings.yaml then deep-merge the active config set on top.
+
+    Resolution order (highest wins):
+      1. set_name argument (--set CLI flag)
+      2. config/active_set file
+      3. base settings.yaml alone
+    """
     path = Path(config_path)
     if not path.exists():
         raise FileNotFoundError(f"Settings file not found: {path}")
     with path.open() as fh:
-        return yaml.safe_load(fh) or {}
+        base = yaml.safe_load(fh) or {}
+
+    resolved = set_name
+    if resolved is None and _ACTIVE_SET_FILE.exists():
+        resolved = _ACTIVE_SET_FILE.read_text().strip() or None
+
+    if resolved:
+        set_path = _SETS_DIR / f"{resolved}.yaml"
+        if set_path.exists():
+            with set_path.open() as fh:
+                overrides = yaml.safe_load(fh) or {}
+            base = _deep_merge(base, overrides)
+            logger.info("Config set '%s' applied.", resolved)
+        else:
+            logger.warning("Config set '%s' not found at %s — using base config.",
+                           resolved, set_path)
+            resolved = None
+
+    base["_active_set"] = resolved or "base"
+    return base
 
 
 def load_credentials(credentials_path: str = "config/credentials.yaml") -> Optional[Dict]:
@@ -2080,6 +2120,8 @@ def build_parser() -> argparse.ArgumentParser:
                           help="Asset group from config (stocks | crypto | indices)")
     trade_p.add_argument("--symbols",      default=None,
                           help="Comma-separated symbols — overrides asset-group")
+    trade_p.add_argument("--set",          default=None, dest="config_set",
+                          help="Config set to apply (conservative | balanced | aggressive)")
 
     # ── backtest ──────────────────────────────────────────────────────────────
     bt_p = sub.add_parser("backtest", help="Run walk-forward backtest")
@@ -2098,6 +2140,8 @@ def build_parser() -> argparse.ArgumentParser:
                        help="Add benchmark comparison table")
     bt_p.add_argument("--stress-test", action="store_true", dest="stress_test",
                        help="Run stress scenarios after the backtest")
+    bt_p.add_argument("--set",         default=None, dest="config_set",
+                       help="Config set to apply (conservative | balanced | aggressive)")
 
     # ── stress ────────────────────────────────────────────────────────────────
     stress_p = sub.add_parser("stress", help="Run stress-test scenario suite")
@@ -2106,6 +2150,8 @@ def build_parser() -> argparse.ArgumentParser:
     stress_p.add_argument("--symbols", default=None)
     stress_p.add_argument("--start",   default=None)
     stress_p.add_argument("--end",     default=None)
+    stress_p.add_argument("--set",     default=None, dest="config_set",
+                           help="Config set to apply")
 
     # ── full-cycle ────────────────────────────────────────────────────────────
     full_p = sub.add_parser("full-cycle", help="Run backtest for all 3 asset groups (stocks, crypto, indices)")
@@ -2113,6 +2159,8 @@ def build_parser() -> argparse.ArgumentParser:
     full_p.add_argument("--start",     default=None)
     full_p.add_argument("--end",       default=None)
     full_p.add_argument("--output",    default="results/")
+    full_p.add_argument("--set",       default=None, dest="config_set",
+                         help="Config set to apply")
 
     return parser
 
@@ -2124,7 +2172,7 @@ def main() -> None:
     parser = build_parser()
     args   = parser.parse_args()
 
-    config = load_config(args.config)
+    config = load_config(args.config, set_name=getattr(args, "config_set", None))
     load_credentials()
 
     if args.command == "trade":
