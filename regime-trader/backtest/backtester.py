@@ -243,19 +243,31 @@ class WalkForwardBacktester:
         # ── Build synthetic OHLCV for every symbol ────────────────────────────
         ohlcv: Dict[str, pd.DataFrame] = {s: _ohlcv_from_close(prices[s]) for s in syms}
 
-        # ── Compute features on the full price history (market symbol = first) ─
-        market_sym = syms[0]
+        # ── Compute composite features averaged across all symbols ───────────
+        # Each symbol contributes equally. Averaging z-scored features produces
+        # a cross-asset regime signal: gold and bonds in calm mode partially
+        # offset equity stress, so the HMM sees the portfolio's true environment
+        # rather than projecting one symbol's stress onto all assets.
         fe = FeatureEngineer(
             zscore_window=self.zscore_window,
             sma_long=self.sma_long,
             sma_trend=self.sma_trend,
             volume_norm_window=self.volume_norm_window,
         )
-        full_features_raw = fe.build_feature_matrix(
-            ohlcv[market_sym],
-            feature_names=_hmm_feature_names(hmm_cfg),
-            dropna=False,
-        )
+        feature_names = _hmm_feature_names(hmm_cfg)
+        per_sym_features = []
+        for s in syms:
+            f = fe.build_feature_matrix(
+                ohlcv[s],
+                feature_names=feature_names,
+                dropna=False,
+            )
+            per_sym_features.append(f)
+
+        # Average across symbols on matching dates; any symbol missing a date
+        # is excluded from that bar's average (not filled with zero).
+        full_features_raw = pd.concat(per_sym_features).groupby(level=0).mean()
+        full_features_raw = full_features_raw.reindex(prices.index)
 
         # ── Identify clean rows (all features non-NaN) ────────────────────────
         clean_mask = full_features_raw.notna().all(axis=1)
