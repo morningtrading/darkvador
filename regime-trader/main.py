@@ -1698,10 +1698,11 @@ def run_backtest(config: Dict, args: argparse.Namespace) -> None:
         step_size       = step_size,
         slippage_pct    = slippage_pct,
         risk_free_rate  = risk_free_rate,
-        zscore_window       = int(config.get("backtest", {}).get("zscore_window",      60)),
-        sma_long            = int(config.get("backtest", {}).get("sma_long",           200)),
-        sma_trend           = int(config.get("backtest", {}).get("sma_trend",           50)),
-        volume_norm_window  = int(config.get("backtest", {}).get("volume_norm_window",  50)),
+        zscore_window           = int(config.get("backtest", {}).get("zscore_window",           60)),
+        sma_long                = int(config.get("backtest", {}).get("sma_long",               200)),
+        sma_trend               = int(config.get("backtest", {}).get("sma_trend",               50)),
+        volume_norm_window      = int(config.get("backtest", {}).get("volume_norm_window",       50)),
+        min_rebalance_interval  = int(config.get("backtest", {}).get("min_rebalance_interval",    0)),
     )
 
     try:

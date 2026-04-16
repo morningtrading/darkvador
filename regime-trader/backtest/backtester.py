@@ -182,6 +182,7 @@ class WalkForwardBacktester:
         sma_long: int = 200,
         sma_trend: int = 50,
         volume_norm_window: int = 50,
+        min_rebalance_interval: int = 0,
     ) -> None:
         self.symbols = symbols
         self.initial_capital = initial_capital
@@ -195,6 +196,7 @@ class WalkForwardBacktester:
         self.sma_long = sma_long
         self.sma_trend = sma_trend
         self.volume_norm_window = volume_norm_window
+        self.min_rebalance_interval = min_rebalance_interval
 
         self._results: Optional[BacktestResult] = None
 
@@ -470,6 +472,7 @@ class WalkForwardBacktester:
         prev_equity: float = start_equity
         # pending stores target weights (not shares) for 1-bar fill delay
         pending: Optional[Dict] = None
+        bars_since_rebalance: int = self.min_rebalance_interval  # allow first rebalance immediately
 
         oos_timestamps = list(oos_features.index)
 
@@ -527,6 +530,10 @@ class WalkForwardBacktester:
                     }
                     orch.update_weights(actual_wts)
                 pending = None
+                bars_since_rebalance = 0
+
+            else:
+                bars_since_rebalance += 1
 
             # ── 5b. Mark to market ────────────────────────────────────────────
             equity = cash + sum(
@@ -562,7 +569,7 @@ class WalkForwardBacktester:
             )
 
             # ── 5f. Queue target weights for execution at next bar ────────────
-            if signals:
+            if signals and bars_since_rebalance >= self.min_rebalance_interval:
                 pending = {
                     "weights": {
                         sig.symbol: sig.position_size_pct * sig.leverage
