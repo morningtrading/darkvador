@@ -3,9 +3,9 @@
 
 hmm:
   n_candidates: [3, 4, 5, 6]    # drop 7-state (overfits on daily data)
-  stability_bars: 7              # ~1.5 weeks to confirm
+  stability_bars: 5              # cs-sweep validated: stab=5 beats stab=7 (+0.03 Sharpe)
   flicker_threshold: 4           # reasonable tolerance
-  min_confidence: 0.62           # realistic for 4-6 state HMM
+  min_confidence: 0.60           # cs-sweep validated: conf plateau at 0.55-0.65, 0.60 is centre
 
 strategy:
   mid_vol_allocation_no_trend: 0.70
