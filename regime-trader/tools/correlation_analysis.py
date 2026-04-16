@@ -78,12 +78,14 @@ def _fetch_prices(symbols, start, end, api_key, secret_key):
         from alpaca.data import StockHistoricalDataClient
         from alpaca.data.requests import StockBarsRequest
         from alpaca.data.enums import Adjustment
+        from alpaca.data.enums import DataFeed
         sc = StockHistoricalDataClient(api_key, secret_key)
         req = StockBarsRequest(
             symbol_or_symbols=stock_syms,
             timeframe=TimeFrame.Day,
             start=start, end=end,
             adjustment=Adjustment.ALL,
+            feed=DataFeed.IEX,
         )
         df = sc.get_stock_bars(req).df
         close = df["close"].unstack(level="symbol")
