@@ -25,6 +25,7 @@ target *shares* are computed at execution time using the pre-trade equity.
 
 from __future__ import annotations
 
+import copy
 import logging
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
@@ -591,6 +592,328 @@ class WalkForwardBacktester:
             trades=trades,
             n_hmm_states=engine._n_states,
         )
+
+    def _run_oos_sim(
+        self,
+        fold_id: int,
+        prices: pd.DataFrame,
+        ohlcv_by_symbol: Dict,
+        is_features,
+        oos_features,
+        start_equity: float,
+        fitted_engine: "HMMEngine",
+        strat_cfg: Dict,
+        min_conf: float,
+    ) -> WindowResult:
+        """
+        Replay OOS simulation using a *pre-fitted* engine.
+
+        ``fitted_engine`` must already have been trained via ``engine.fit()``.
+        This method deep-copies it, sets ``min_confidence`` and
+        ``stability_bars`` from the engine's current attribute values, warms
+        the forward-pass cache over the IS bars, then runs the OOS sim.
+
+        Used by :meth:`run_grid` to avoid retraining HMM weights for every
+        grid cell.
+        """
+        from core.regime_strategies import StrategyOrchestrator
+
+        engine = copy.deepcopy(fitted_engine)
+
+        # Build orchestrator (cheap — no training involved)
+        regime_infos = engine.get_all_regime_info()
+        rebalance_thr = strat_cfg.get("strategy", {}).get("rebalance_threshold", 0.10)
+        orch = StrategyOrchestrator(
+            config=strat_cfg,
+            regime_infos=regime_infos,
+            min_confidence=min_conf,
+            rebalance_threshold=rebalance_thr,
+        )
+
+        # Warm up the forward-pass cache on IS bars
+        for t in range(len(is_features)):
+            engine.update(is_features.values[t])
+
+        # OOS simulation (identical logic to _run_single_window step 4-5)
+        cash: float = start_equity
+        shares: Dict[str, float] = {s: 0.0 for s in self.symbols}
+
+        equity_curve: Dict = {}
+        returns_dict: Dict = {}
+        regime_dict:  Dict = {}
+        trades: List[Dict] = []
+
+        prev_equity: float = start_equity
+        pending = None
+        bars_since_rebalance: int = self.min_rebalance_interval
+
+        oos_timestamps = list(oos_features.index)
+
+        for t, bar_date in enumerate(oos_timestamps):
+            if bar_date not in prices.index:
+                continue
+
+            cur_px: Dict[str, float] = {}
+            for s in self.symbols:
+                if s in prices.columns:
+                    val = prices.loc[bar_date, s]
+                    if pd.notna(val) and val > 0:
+                        cur_px[s] = float(val)
+
+            # Execute pending (1-bar fill delay)
+            if pending is not None:
+                equity_pre = cash + sum(
+                    shares[s] * cur_px.get(s, 0.0) for s in self.symbols
+                )
+                for sym, target_wt in pending["weights"].items():
+                    price = cur_px.get(sym)
+                    if not price:
+                        continue
+                    target_shr = equity_pre * target_wt / price
+                    delta = target_shr - shares.get(sym, 0.0)
+                    if abs(delta * price) < 1.0:
+                        continue
+                    sign = 1.0 if delta > 0 else -1.0
+                    fill_px = price * (1.0 + sign * self.slippage_pct)
+                    cash -= delta * fill_px
+                    shares[sym] = target_shr
+                    trades.append({
+                        "fold": fold_id,
+                        "timestamp": bar_date,
+                        "symbol": sym,
+                        "delta_shares": delta,
+                        "fill_price": fill_px,
+                        "trade_value": abs(delta * fill_px),
+                        "slippage_cost": abs(delta * fill_px * self.slippage_pct),
+                        "regime": pending["regime"],
+                        "regime_prob": pending["regime_prob"],
+                        "target_weight": target_wt,
+                    })
+                equity_post = cash + sum(
+                    shares[s] * cur_px.get(s, 0.0) for s in self.symbols
+                )
+                if equity_post > 0:
+                    actual_wts = {
+                        s: (shares[s] * cur_px.get(s, 0.0)) / equity_post
+                        for s in self.symbols
+                    }
+                    orch.update_weights(actual_wts)
+                pending = None
+                bars_since_rebalance = 0
+            else:
+                bars_since_rebalance += 1
+
+            equity = cash + sum(shares[s] * cur_px.get(s, 0.0) for s in self.symbols)
+            equity_curve[bar_date] = equity
+            returns_dict[bar_date] = (equity / prev_equity - 1.0) if prev_equity > 0 else 0.0
+            prev_equity = equity
+
+            regime_state  = engine.update(oos_features.values[t], bar_date)
+            is_flickering = engine.is_flickering()
+            regime_dict[bar_date] = regime_state.label
+
+            bars_for_signal: Dict = {}
+            for s in self.symbols:
+                if s not in ohlcv_by_symbol:
+                    continue
+                sym_ohlcv = ohlcv_by_symbol[s]
+                try:
+                    end_loc = sym_ohlcv.index.get_loc(bar_date) + 1
+                except KeyError:
+                    continue
+                bars_for_signal[s] = sym_ohlcv.iloc[max(0, end_loc - 250):end_loc]
+
+            signals = orch.generate_signals(
+                self.symbols, bars_for_signal, regime_state, is_flickering
+            )
+            if signals and bars_since_rebalance >= self.min_rebalance_interval:
+                pending = {
+                    "weights": {
+                        sig.symbol: sig.position_size_pct * sig.leverage
+                        for sig in signals
+                    },
+                    "regime": regime_state.label,
+                    "regime_prob": regime_state.probability,
+                }
+
+        return WindowResult(
+            fold_id=fold_id,
+            train_start=is_features.index[0],
+            train_end=is_features.index[-1],
+            test_start=oos_features.index[0],
+            test_end=oos_features.index[-1],
+            equity_curve=pd.Series(equity_curve, name="equity"),
+            returns=pd.Series(returns_dict, name="returns"),
+            regime_series=pd.Series(regime_dict, name="regime"),
+            trades=trades,
+            n_hmm_states=engine._n_states,
+        )
+
+    def run_grid(
+        self,
+        prices: pd.DataFrame,
+        conf_values: List[float],
+        stab_values: List[int],
+        hmm_config: Optional[Dict] = None,
+        strategy_config: Optional[Dict] = None,
+        progress_callback=None,
+    ) -> "List[Tuple[float, int, BacktestResult]]":
+        """
+        2-D grid sweep over ``min_confidence`` × ``stability_bars``.
+
+        HMM models are trained **once per fold** (same deterministic seed →
+        same weights regardless of stability/confidence).  The pre-trained
+        engine is deep-copied and replayed for every grid cell, making the
+        total work  ``n_folds × n_cells``  OOS sims instead of
+        ``n_folds × n_cells``  full trainings.
+
+        Returns
+        -------
+        List of ``(conf, stab, BacktestResult)`` tuples, one per grid cell.
+        """
+        hmm_cfg   = {**_DEFAULT_HMM_CFG, **(hmm_config or {})}
+        strat_cfg = _DEFAULT_STRAT_CFG.copy()
+        if strategy_config:
+            strat_cfg["strategy"] = {
+                **strat_cfg["strategy"],
+                **strategy_config.get("strategy", strategy_config),
+            }
+
+        syms = [s for s in self.symbols if s in prices.columns]
+        if not syms:
+            raise ValueError("None of the requested symbols are in the prices DataFrame.")
+
+        ohlcv: Dict = {s: _ohlcv_from_close(prices[s]) for s in syms}
+
+        market_sym = syms[0]
+        fe = FeatureEngineer(
+            zscore_window=self.zscore_window,
+            sma_long=self.sma_long,
+            sma_trend=self.sma_trend,
+            volume_norm_window=self.volume_norm_window,
+        )
+        full_features_raw = fe.build_feature_matrix(
+            ohlcv[market_sym],
+            feature_names=_hmm_feature_names(hmm_cfg),
+            dropna=False,
+        )
+        clean_mask     = full_features_raw.notna().all(axis=1)
+        clean_features = full_features_raw[clean_mask]
+        n_clean        = len(clean_features)
+
+        windows_idx = self._generate_windows(n_clean)
+        if not windows_idx:
+            raise ValueError(
+                f"Insufficient data for grid sweep: {n_clean} clean bars, "
+                f"need >= {self.train_window + self.test_window}."
+            )
+
+        n_folds = len(windows_idx)
+        n_cells = len(conf_values) * len(stab_values)
+
+        # ── Phase 1: train one engine per fold ────────────────────────────────
+        if progress_callback:
+            progress_callback("train_start", n_folds, 0, n_cells)
+
+        trained: List[Tuple] = []   # (fold_id, engine, is_features, oos_features, equity_start)
+        equity = self.initial_capital
+
+        for fold_id, (is_s, is_e, oos_s, oos_e) in enumerate(windows_idx):
+            is_feat  = clean_features.iloc[is_s:is_e]
+            oos_feat = clean_features.iloc[oos_s:oos_e]
+
+            min_train = hmm_cfg.get("min_train_bars", 120)
+            if len(is_feat) < min_train or len(oos_feat) == 0:
+                continue
+
+            if progress_callback:
+                progress_callback("training", n_folds, fold_id, n_cells)
+
+            engine = HMMEngine(**{k: v for k, v in hmm_cfg.items()})
+            engine.fit(is_feat.values)
+
+            # Run fold ONCE with base params to get equity carry-over
+            base_wr = self._run_oos_sim(
+                fold_id, prices, ohlcv, is_feat, oos_feat,
+                equity, engine, strat_cfg,
+                min_conf=hmm_cfg.get("min_confidence", 0.55),
+            )
+            trained.append((fold_id, engine, is_feat, oos_feat, equity))
+            if len(base_wr.equity_curve) > 0:
+                equity = float(base_wr.equity_curve.iloc[-1])
+
+        if not trained:
+            raise RuntimeError("All folds skipped during grid-sweep training phase.")
+
+        # ── Phase 2: replay grid ──────────────────────────────────────────────
+        results: List[Tuple[float, int, BacktestResult]] = []
+        cell_idx = 0
+
+        for conf in conf_values:
+            for stab in stab_values:
+                if progress_callback:
+                    progress_callback("sweep", n_folds, cell_idx, n_cells)
+                cell_idx += 1
+
+                fold_results: List[WindowResult] = []
+                cell_equity = self.initial_capital
+
+                for fold_id, engine, is_feat, oos_feat, _base_eq in trained:
+                    # Deep-copy and override inference params only
+                    eng = copy.deepcopy(engine)
+                    eng.stability_bars  = stab
+                    eng.min_confidence  = conf
+
+                    try:
+                        wr = self._run_oos_sim(
+                            fold_id, prices, ohlcv, is_feat, oos_feat,
+                            cell_equity, eng, strat_cfg, min_conf=conf,
+                        )
+                    except Exception as exc:
+                        logger.warning("Grid cell (conf=%.2f stab=%d) fold %d failed: %s",
+                                       conf, stab, fold_id, exc)
+                        continue
+
+                    fold_results.append(wr)
+                    if len(wr.equity_curve) > 0:
+                        cell_equity = float(wr.equity_curve.iloc[-1])
+
+                if not fold_results:
+                    continue
+
+                combined_equity  = self._stitch_equity_curves(fold_results)
+                combined_returns = pd.concat(
+                    [w.returns for w in fold_results if len(w.returns) > 0]
+                ).sort_index()
+                combined_regimes = pd.concat(
+                    [w.regime_series for w in fold_results if len(w.regime_series) > 0]
+                ).sort_index()
+                all_trades = [t for w in fold_results for t in w.trades]
+
+                bt_result = BacktestResult(
+                    windows=fold_results,
+                    combined_equity=combined_equity,
+                    combined_returns=combined_returns,
+                    combined_regimes=combined_regimes,
+                    initial_capital=self.initial_capital,
+                    final_equity=float(combined_equity.iloc[-1]) if len(combined_equity) > 0
+                                 else self.initial_capital,
+                    metadata={
+                        "n_folds":      len(fold_results),
+                        "symbols":      syms,
+                        "total_trades": len(all_trades),
+                        "train_window": self.train_window,
+                        "test_window":  self.test_window,
+                        "step_size":    self.step_size,
+                        "slippage_pct": self.slippage_pct,
+                        "hmm_config":   {**hmm_cfg,
+                                         "min_confidence": conf,
+                                         "stability_bars": stab},
+                    },
+                )
+                results.append((conf, stab, bt_result))
+
+        return results
 
     # ── Stitching helpers ──────────────────────────────────────────────────────
 

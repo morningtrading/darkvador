@@ -2313,6 +2313,255 @@ def run_interval_sweep(config: Dict, args: argparse.Namespace) -> None:
     _print(f"  Saved → {out_path}", console, style="dim")
 
 
+def run_cs_sweep(config: Dict, args: argparse.Namespace) -> None:
+    """
+    2-D grid sweep over min_confidence × stability_bars.
+
+    HMM models are trained once per fold and replayed for every grid cell
+    (both parameters are inference-only — they don't change the EM weights).
+    This makes the sweep ~n_cells times faster than running full backtests.
+    """
+    from backtest.backtester import WalkForwardBacktester
+    from backtest.performance import PerformanceAnalyzer
+
+    console = _console()
+
+    # ── Parse grid values ─────────────────────────────────────────────────────
+    raw_conf = getattr(args, "conf_values", None) or "0.55,0.60,0.65,0.70,0.75"
+    raw_stab = getattr(args, "stab_values", None) or "3,5,7,9,12"
+    try:
+        conf_values = [float(v.strip()) for v in raw_conf.split(",")]
+        stab_values = [int(v.strip())   for v in raw_stab.split(",")]
+    except ValueError:
+        _print("[red]--conf and --stab must be comma-separated numbers[/red]", console)
+        sys.exit(1)
+
+    symbols: List[str] = _resolve_symbols(
+        config,
+        asset_group=getattr(args, "asset_group", None),
+        symbols_arg=getattr(args, "symbols",     None),
+    )
+
+    bt_cfg          = config.get("backtest", {})
+    start_date: str = getattr(args, "start", None) or "2018-01-01"
+    end_date: str   = getattr(args, "end",   None) or pd.Timestamp.today().strftime("%Y-%m-%d")
+
+    initial_capital = float(bt_cfg.get("initial_capital", 100_000))
+    slippage_pct    = float(bt_cfg.get("slippage_pct",    0.0005))
+    train_window    = int(bt_cfg.get("train_window",      252))
+    test_window     = int(bt_cfg.get("test_window",       126))
+    step_size       = int(bt_cfg.get("step_size",         126))
+    risk_free_rate  = float(bt_cfg.get("risk_free_rate",  0.045))
+
+    n_cells = len(conf_values) * len(stab_values)
+    _print(
+        f"\n[bold cyan]min_confidence × stability_bars Grid Sweep[/bold cyan]\n"
+        f"  Symbols : {', '.join(symbols[:6])}{'…' if len(symbols) > 6 else ''}\n"
+        f"  Period  : {start_date}  →  {end_date}\n"
+        f"  conf    : {conf_values}\n"
+        f"  stab    : {stab_values}\n"
+        f"  Cells   : {n_cells}  (HMM trained once per fold, replayed per cell)",
+        console,
+    )
+
+    api_key    = os.environ.get("ALPACA_API_KEY",    "")
+    secret_key = os.environ.get("ALPACA_SECRET_KEY", "")
+    if not api_key or not secret_key:
+        _print("[red]ERROR: Alpaca credentials not found.[/red]", console)
+        sys.exit(1)
+
+    _print("\nFetching historical data ...", console, style="dim")
+    try:
+        prices = _fetch_prices(symbols, start_date, end_date, api_key, secret_key)
+    except Exception as exc:
+        _print(f"[red]Data fetch failed:[/red] {exc}", console)
+        sys.exit(1)
+    _print(
+        f"  {len(prices)} bars  ({prices.index[0].date()} → {prices.index[-1].date()})",
+        console, style="dim",
+    )
+
+    hmm_cfg_raw = config.get("hmm", {})
+    hmm_config = {
+        "n_candidates":      hmm_cfg_raw.get("n_candidates", [3, 4, 5]),
+        "n_init":            hmm_cfg_raw.get("n_init", 10),
+        "min_train_bars":    hmm_cfg_raw.get("min_train_bars", 120),
+        "stability_bars":    hmm_cfg_raw.get("stability_bars", 3),
+        "flicker_window":    hmm_cfg_raw.get("flicker_window", 20),
+        "flicker_threshold": hmm_cfg_raw.get("flicker_threshold", 4),
+        "min_confidence":    hmm_cfg_raw.get("min_confidence", 0.55),
+    }
+    strategy_config = {"strategy": config.get("strategy", {})}
+
+    logging.getLogger("hmmlearn").setLevel(logging.ERROR)
+    logging.getLogger("core.hmm_engine").setLevel(logging.WARNING)
+
+    bt = WalkForwardBacktester(
+        symbols         = list(prices.columns),
+        initial_capital = initial_capital,
+        train_window    = train_window,
+        test_window     = test_window,
+        step_size       = step_size,
+        slippage_pct    = slippage_pct,
+        risk_free_rate  = risk_free_rate,
+        zscore_window        = int(bt_cfg.get("zscore_window",        60)),
+        sma_long             = int(bt_cfg.get("sma_long",            200)),
+        sma_trend            = int(bt_cfg.get("sma_trend",            50)),
+        volume_norm_window   = int(bt_cfg.get("volume_norm_window",    50)),
+        min_rebalance_interval = int(bt_cfg.get("min_rebalance_interval", 0)),
+    )
+
+    pa = PerformanceAnalyzer(risk_free_rate=risk_free_rate, trading_days_per_year=252)
+
+    cell_counter = [0]
+    n_folds_total = [0]
+
+    def _grid_progress(phase: str, n_folds: int, idx: int, n_cells: int) -> None:
+        n_folds_total[0] = n_folds
+        if phase == "training":
+            msg = f"  Training fold {idx+1}/{n_folds} ..."
+        elif phase == "sweep":
+            cell_counter[0] = idx + 1
+            conf_i = idx // len(stab_values)
+            stab_i = idx %  len(stab_values)
+            msg = (
+                f"  Sweeping cell {idx+1}/{n_cells}  "
+                f"conf={conf_values[conf_i]:.2f}  stab={stab_values[stab_i]} ..."
+            )
+        else:
+            return
+        if console:
+            console.print(msg, style="dim", end="\r")
+        else:
+            print(msg, end="\r", flush=True)
+
+    _print("\nRunning grid sweep ...", console, style="dim")
+    try:
+        grid_results = bt.run_grid(
+            prices,
+            conf_values=conf_values,
+            stab_values=stab_values,
+            hmm_config=hmm_config,
+            strategy_config=strategy_config,
+            progress_callback=_grid_progress,
+        )
+    except Exception as exc:
+        _print(f"\n[red]Grid sweep failed:[/red] {exc}", console)
+        sys.exit(1)
+
+    _print("", console)  # clear \r line
+
+    if not grid_results:
+        _print("[red]No results produced.[/red]", console)
+        return
+
+    # ── Collect metrics ───────────────────────────────────────────────────────
+    rows = []
+    for conf, stab, result in grid_results:
+        rpt = pa.analyze(result)
+        rows.append({
+            "conf":     conf,
+            "stab":     stab,
+            "sharpe":   rpt.sharpe_ratio,
+            "cagr":     rpt.cagr if rpt.cagr is not None else float("nan"),
+            "max_dd":   rpt.max_drawdown,
+            "calmar":   rpt.calmar_ratio if rpt.calmar_ratio is not None else float("nan"),
+            "trades":   rpt.total_trades,
+            "final_eq": result.final_equity,
+        })
+
+    best = max(rows, key=lambda r: r["sharpe"])
+
+    # ── Rich 2-D Sharpe heatmap table ─────────────────────────────────────────
+    try:
+        from rich.table import Table
+        from rich import box as rbox
+        from rich.text import Text
+
+        # Flat sorted table
+        flat_tbl = Table(
+            title=f"conf × stab Grid — {', '.join(symbols[:4])}{'…' if len(symbols) > 4 else ''}",
+            box=rbox.ROUNDED,
+            header_style="bold cyan",
+        )
+        flat_tbl.add_column("Conf",    justify="right")
+        flat_tbl.add_column("Stab",    justify="right")
+        flat_tbl.add_column("Sharpe",  justify="right")
+        flat_tbl.add_column("CAGR",    justify="right")
+        flat_tbl.add_column("Max DD",  justify="right")
+        flat_tbl.add_column("Calmar",  justify="right")
+        flat_tbl.add_column("Trades",  justify="right")
+        flat_tbl.add_column("Final $", justify="right")
+
+        for r in sorted(rows, key=lambda x: x["sharpe"], reverse=True):
+            is_best   = r["conf"] == best["conf"] and r["stab"] == best["stab"]
+            style     = "bold green" if is_best else ""
+            conf_cell = (
+                Text(f"{r['conf']:.2f} ★", style="bold green") if is_best
+                else f"{r['conf']:.2f}"
+            )
+            flat_tbl.add_row(
+                conf_cell,
+                Text(f"{r['stab']}",              style=style),
+                Text(f"{r['sharpe']:>6.3f}",       style=style),
+                Text(f"{r['cagr']:>+7.2%}",        style=style),
+                Text(f"{r['max_dd']:>7.2%}",        style=style),
+                Text(f"{r['calmar']:>6.3f}",        style=style),
+                Text(f"{r['trades']:>6d}",          style=style),
+                Text(f"${r['final_eq']:>12,.0f}",   style=style),
+            )
+
+        # 2-D Sharpe grid
+        grid_tbl = Table(
+            title="Sharpe  (rows = stability_bars, cols = min_confidence)",
+            box=rbox.SIMPLE_HEAD,
+            header_style="bold yellow",
+        )
+        grid_tbl.add_column("stab \\ conf", justify="right")
+        for c in conf_values:
+            grid_tbl.add_column(f"{c:.2f}", justify="right")
+
+        sharpe_lookup = {(r["conf"], r["stab"]): r["sharpe"] for r in rows}
+        for stab in stab_values:
+            cells = []
+            for conf in conf_values:
+                s = sharpe_lookup.get((conf, stab), float("nan"))
+                is_best_cell = conf == best["conf"] and stab == best["stab"]
+                txt = f"{s:.3f}" if not (s != s) else "—"
+                cells.append(Text(txt, style="bold green") if is_best_cell else txt)
+            grid_tbl.add_row(str(stab), *cells)
+
+        if console:
+            console.print(flat_tbl)
+            console.print(grid_tbl)
+        else:
+            print("\nSorted results:")
+            for r in sorted(rows, key=lambda x: x["sharpe"], reverse=True):
+                marker = " ★" if r["conf"] == best["conf"] and r["stab"] == best["stab"] else "  "
+                print(f"  conf={r['conf']:.2f} stab={r['stab']:>2}{marker}"
+                      f"  Sharpe={r['sharpe']:.3f}  CAGR={r['cagr']:+.2%}"
+                      f"  MaxDD={r['max_dd']:.2%}  Trades={r['trades']}")
+
+    except ImportError:
+        for r in sorted(rows, key=lambda x: x["sharpe"], reverse=True):
+            print(f"conf={r['conf']:.2f} stab={r['stab']:>2}  "
+                  f"Sharpe={r['sharpe']:.3f}  CAGR={r['cagr']:+.2%}")
+
+    _print(
+        f"\n[bold green]Winner: conf={best['conf']:.2f}  stab={best['stab']}[/bold green]  "
+        f"Sharpe={best['sharpe']:.3f}  CAGR={best['cagr']:+.2%}  "
+        f"MaxDD={best['max_dd']:.2%}  Trades={best['trades']}",
+        console,
+    )
+
+    # ── Save ──────────────────────────────────────────────────────────────────
+    _SAVED_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    ts = dt.datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    out_path = _SAVED_RESULTS_DIR / f"cs_sweep_{ts}.csv"
+    pd.DataFrame(rows).to_csv(out_path, index=False)
+    _print(f"  Saved → {out_path}", console, style="dim")
+
+
 def run_stress_test(config: Dict, args: argparse.Namespace) -> None:
     """Standalone stress-test entry point (delegates to run_backtest --stress-test)."""
     args.stress_test = True
@@ -2398,6 +2647,24 @@ def build_parser() -> argparse.ArgumentParser:
     full_p.add_argument("--set",       default=None, dest="config_set",
                          help="Config set to apply")
 
+    # ── cs-sweep ──────────────────────────────────────────────────────────────
+    cs_p = sub.add_parser(
+        "cs-sweep",
+        help="2-D grid sweep: min_confidence × stability_bars (trains once per fold)",
+    )
+    cs_p.add_argument("--config",      default="config/settings.yaml")
+    cs_p.add_argument("--asset-group", default=None, dest="asset_group")
+    cs_p.add_argument("--symbols",     default=None)
+    cs_p.add_argument("--start",       default=None)
+    cs_p.add_argument("--end",         default=None)
+    cs_p.add_argument("--conf",        default="0.55,0.60,0.65,0.70,0.75",
+                       dest="conf_values",
+                       help="Comma-separated min_confidence values (default: 0.55,0.60,0.65,0.70,0.75)")
+    cs_p.add_argument("--stab",        default="3,5,7,9,12",
+                       dest="stab_values",
+                       help="Comma-separated stability_bars values (default: 3,5,7,9,12)")
+    cs_p.add_argument("--set",         default=None, dest="config_set")
+
     # ── sweep ─────────────────────────────────────────────────────────────────
     sweep_p = sub.add_parser(
         "sweep",
@@ -2451,6 +2718,9 @@ def main() -> None:
 
     elif args.command == "sweep":
         run_interval_sweep(config, args)
+
+    elif args.command == "cs-sweep":
+        run_cs_sweep(config, args)
 
     else:
         parser.print_help()
