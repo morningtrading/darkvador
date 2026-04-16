@@ -10,7 +10,7 @@ The system classifies the current market environment (low-vol, mid-vol, high-vol
 
 ```
 market data
-    └─> FeatureEngineer      (log returns, realised vol 5d/21d)
+    └─> FeatureEngineer      (log returns, realised vol, ADX, SMA distances)
             └─> HMMEngine    (BIC model selection, regime label + confidence)
                     └─> RegimeStrategy   (target weights per regime)
                             └─> RiskManager  (size, exposure, drawdown gates)
@@ -28,14 +28,18 @@ Supporting layer runs in parallel:
 
 ## Regime framework
 
-| Regime | Market condition | Allocation | Leverage |
-|---|---|---|---|
-| `low_vol` | Low realised volatility, trending | 95% of equity | 1.25× |
-| `mid_vol` (trend) | Transition, trend signal present | 95% of equity | 1.0× |
-| `mid_vol` (no trend) | Transition, no clear trend | 60% of equity | 1.0× |
-| `high_vol` | Elevated volatility, risk-off | 60% of equity | 1.0× |
+The HMM maps its internal states to vol tiers by sorting them on expected volatility (ascending). Labels are assigned by expected return (ascending). This makes the mapping independent of arbitrary state ordering.
 
-The HMM maps its internal states to these labels via BIC-selected model size (3–7 states) and rolling stability filtering (requires 3 consecutive bars in the same state before acting).
+| Regime | Market condition | Default allocation | Leverage |
+|---|---|---|---|
+| `low_vol` | Calmest HMM state, trending | 95% of equity | 1.25× |
+| `mid_vol` (trend) | Transition, price above 50 EMA | 95% of equity | 1.0× |
+| `mid_vol` (no trend) | Transition, price below 50 EMA | 75% of equity | 1.0× |
+| `high_vol` | Most volatile HMM state | 75% of equity | 1.0× |
+
+Allocations above are the **base** (`settings.yaml`). Config sets override them — see [Config sets](#config-sets).
+
+Stability filtering requires a configurable number of consecutive bars in the same state before a regime flip is confirmed. An uncertainty discount halves all position sizes if confidence is below threshold or the regime is flickering.
 
 ---
 
@@ -44,8 +48,14 @@ The HMM maps its internal states to these labels via BIC-selected model size (3�
 ```
 regime-trader/
 ├── config/
-│   ├── settings.yaml          # All tuneable parameters (universe, risk, HMM, backtest)
-│   └── credentials.yaml       # Alpaca API keys — git-ignored, never commit
+│   ├── settings.yaml          # Base parameters (universe, risk, HMM, backtest)
+│   ├── credentials.yaml       # Alpaca API keys — git-ignored, never commit
+│   ├── active_set             # Name of the active config set (e.g. "balanced")
+│   ├── test_portfolios.yaml   # Four curated stock sets for comparative backtests
+│   └── sets/
+│       ├── conservative.yaml  # Low-churn, capital-preservation overrides
+│       ├── balanced.yaml      # Fixes main issues — recommended default
+│       └── aggressive.yaml    # Max deployment, 1.5× leverage overrides
 │
 ├── core/
 │   ├── hmm_engine.py          # Gaussian HMM with BIC model selection and incremental update
@@ -60,7 +70,7 @@ regime-trader/
 │
 ├── data/
 │   ├── market_data.py         # Historical bars, price pivot, streaming data callbacks
-│   └── feature_engineering.py # Causal feature matrix (log returns, realised vol)
+│   └── feature_engineering.py # Causal feature matrix (log returns, realised vol, ADX, SMA)
 │
 ├── monitoring/
 │   ├── logger.py              # JSON-structured rotating file logger (TradeLogger)
@@ -75,11 +85,14 @@ regime-trader/
 ├── tests/
 │   ├── test_hmm.py            # HMM engine unit tests
 │   ├── test_look_ahead.py     # Verify zero look-ahead bias in feature pipeline
-│   ├── test_strategies.py     # Regime strategy allocation tests (80 tests)
-│   ├── test_risk.py           # Risk manager circuit breaker and sizing tests (23 tests)
-│   └── test_orders.py         # OrderExecutor limit price, sizing, submission (23 tests)
+│   ├── test_strategies.py     # Regime strategy allocation tests
+│   ├── test_risk.py           # Risk manager circuit breaker and sizing tests
+│   └── test_orders.py         # OrderExecutor limit price, sizing, submission
 │
-├── main.py                    # CLI entry point (backtest / trade / stress)
+├── menu/
+│   └── regime_trader.sh       # Interactive bash launcher menu
+│
+├── main.py                    # CLI entry point (backtest / trade / stress / full-cycle)
 ├── pytest.ini                 # Suppresses third-party deprecation warnings
 └── requirements.txt
 ```
@@ -110,60 +123,150 @@ alpaca:
   paper:      true
 ```
 
-Get keys from [alpaca.markets](https://alpaca.markets) -> Paper Trading -> API Keys.
+Get keys from [alpaca.markets](https://alpaca.markets) → Paper Trading → API Keys.
 
 Alternatively use a `.env` file (also git-ignored):
 
 ```
 ALPACA_API_KEY=...
 ALPACA_SECRET_KEY=...
-ALPACA_PAPER=true
 ```
 
 The client loads `credentials.yaml` first and falls back to `.env` / environment variables.
 
-### 3. Run a backtest
+### 3. Launch the menu
+
+The fastest way to run anything:
 
 ```bash
-py -3.12 main.py backtest --symbols SPY QQQ --start 2020-01-01 --end 2024-12-31 --compare
+bash menu/regime_trader.sh
 ```
 
-`--compare` adds a buy-and-hold benchmark column to the output table.
+The menu shows the active asset group and config set, and exposes all run modes as numbered options.
 
-### 4. Run stress tests
+### 4. Run a backtest from the CLI
 
 ```bash
-py -3.12 main.py stress
+py -3.12 main.py backtest --asset-group stocks --start 2020-01-01 --compare
 ```
 
-### 5. Start paper trading
+`--compare` adds buy-and-hold and SMA-200 benchmark columns.
+
+### 5. Run stress tests
+
+```bash
+py -3.12 main.py stress --asset-group stocks --start 2019-01-01
+```
+
+### 6. Start paper trading
 
 ```bash
 py -3.12 main.py trade --paper
 ```
 
-### 6. Run the test suite
+### 7. Run the test suite
 
 ```bash
 py -3.12 -m pytest tests/ -v
 ```
 
-126 tests, ~17 seconds. All pass on the current codebase.
+---
+
+## Config sets
+
+Named parameter sets live in `config/sets/`. Each file contains only the overrides applied on top of `config/settings.yaml`. The active set is stored in `config/active_set`.
+
+| Set | Focus | Key differences from base |
+|---|---|---|
+| `conservative` | Capital preservation | No leverage, stability=9 bars, high_vol alloc=45%, rebalance threshold=25% |
+| `balanced` | Recommended default | stability=7, flicker=4, min_confidence=0.62, high_vol=60%, slippage=10 bps |
+| `aggressive` | Max deployment | 1.5× leverage, stability=5, low_vol=100%, rebalance threshold=10% |
+
+### Switching sets
+
+**Via the menu** — press `[c]` from the main menu and choose a set. The choice is persisted to `config/active_set` and used by all subsequent runs.
+
+**Via CLI for a single run** (does not change `active_set`):
+
+```bash
+py -3.12 main.py backtest --asset-group stocks --start 2020-01-01 --set conservative
+py -3.12 main.py backtest --asset-group stocks --start 2020-01-01 --set aggressive
+```
+
+### Adding a custom set
+
+Drop a YAML file in `config/sets/` with only the parameters you want to override:
+
+```yaml
+# config/sets/my_set.yaml
+hmm:
+  stability_bars: 6
+  min_confidence: 0.65
+strategy:
+  high_vol_allocation: 0.50
+```
+
+Then activate it with `--set my_set` or by updating `config/active_set`.
 
 ---
 
-## Configuration
+## Test portfolios
 
-All parameters are in [config/settings.yaml](config/settings.yaml). Key sections:
+Four pre-defined stock universes for comparative backtests are in `config/test_portfolios.yaml`:
+
+| Portfolio | Symbols | Tests |
+|---|---|---|
+| `mega_cap_tech` | AAPL MSFT NVDA GOOGL META AMZN AMD TSLA | Baseline — clean regime signal, high liquidity |
+| `sector_etf_breadth` | SPY QQQ XLF XLE XLV XLI XLU GLD | Macro regime detection across uncorrelated sectors |
+| `high_beta_growth` | TSLA COIN MSTR PLTR RIVN SMCI SQ RBLX | Stress-tests risk limits and HMM flicker handling |
+| `defensive_value` | JNJ KO WMT PG MCD VZ T MRK | Validates low-vol regime behaviour and rebalance throttle |
+
+Run any portfolio directly:
+
+```bash
+py -3.12 main.py backtest --symbols AAPL,MSFT,NVDA,GOOGL,META,AMZN,AMD,TSLA --start 2020-01-01
+py -3.12 main.py backtest --symbols SPY,QQQ,XLF,XLE,XLV,XLI,XLU,GLD --start 2020-01-01
+```
+
+---
+
+## Configuration reference
+
+All base parameters are in [config/settings.yaml](config/settings.yaml):
 
 | Section | What it controls |
 |---|---|
-| `broker` | Trading universe (10 symbols), timeframe, paper vs live, data feed |
-| `hmm` | State-count candidates (3–7), stability bars, flicker threshold, min confidence |
-| `strategy` | Per-regime allocation fractions, leverage, rebalance threshold, uncertainty multiplier |
+| `broker` | Trading universe, timeframe, paper vs live, data feed |
+| `hmm` | State-count candidates (3–7), stability bars, flicker threshold, min confidence, features |
+| `strategy` | Per-regime allocation fractions, leverage, rebalance threshold, trend lookback |
 | `risk` | Per-trade risk, exposure caps, drawdown thresholds |
 | `backtest` | Walk-forward windows, slippage, benchmark, commission model |
 | `monitoring` | Dashboard refresh rate, alert rate limit, log level and rotation |
+
+Key HMM parameters explained:
+
+| Parameter | Default | Effect |
+|---|---|---|
+| `stability_bars` | 5 (base) / 7 (balanced) | Bars in same state required to confirm a regime flip |
+| `flicker_threshold` | 2 (base) / 4 (balanced) | Max regime changes in `flicker_window` before uncertainty mode |
+| `min_confidence` | 0.70 (base) / 0.62 (balanced) | HMM posterior floor — below this, position sizes are halved |
+| `n_candidates` | [3,4,5,6,7] | State counts tested; best selected by BIC |
+
+---
+
+## Walk-forward backtesting
+
+The backtester uses a strict walk-forward methodology to prevent look-ahead bias:
+
+- **In-sample window** (default 252 bars ≈ 12 months): HMM trained here
+- **Out-of-sample window** (default 126 bars ≈ 6 months): strategy evaluated blind
+- **Step size**: equal to the OOS window — test periods never overlap
+- Equity is carried forward between folds (compounding)
+- ~200 bars consumed as feature warmup (SMA-200 requires 200 bars); data before the first clean bar is not wasted — it feeds the warmup
+
+A start date of 2020-01-01 with default windows produces first OOS results starting around mid-2022. This is expected and correct.
+
+Performance metrics per fold and overall: CAGR, Sharpe, max drawdown, annualised vol, regime breakdown, regime transition matrix, comparison to buy-and-hold and SMA-200 benchmarks.
 
 ---
 
@@ -183,7 +286,7 @@ Every order passes through `RiskManager.validate_signal()` — a 16-layer gate:
 | Stop-loss mandatory | — | Trade rejected if no stop provided |
 | Duplicate order | 60 s window | Trade rejected |
 | Max concurrent positions | 5 | Trade rejected |
-| 1% risk rule | 1% of equity / \|entry-stop\| | Size capped |
+| 1% risk rule | 1% of equity / \|entry−stop\| | Size capped |
 | Max single position | 15% | Trade rejected |
 | Max gross exposure | 80% | Trade rejected |
 | Overnight gap risk | 2% equity / (3× stop distance) | Size capped |
@@ -211,26 +314,11 @@ The strategy is **always long**. It never shorts and never moves entirely to cas
 
 ### Entry
 
-There is no traditional entry trigger (no crossover, no breakout). The position is opened as soon as the HMM first produces a confirmed regime. After that the portfolio is rebalanced every bar that the regime changes or the EMA filter flips — not on a fixed schedule.
-
-### Position sizing by regime
-
-| Regime | Condition | Portfolio deployed | Leverage |
-|---|---|---|---|
-| **Low vol** | Calmest HMM state | 95% | 1.25× |
-| **Mid vol — trend intact** | Price above 50 EMA | 95% | 1.0× |
-| **Mid vol — no trend** | Price below 50 EMA | 60% | 1.0× |
-| **High vol** | Most volatile HMM state | 60% | 1.0× |
-
-Allocation is split equally across all symbols in the universe (e.g. 95% ÷ 10 symbols = 9.5% per symbol).
-
-### Uncertainty discount
-
-If the HMM posterior probability is below 0.55, or the regime is flickering (too many flips in a short window), or the new state is not yet confirmed (< `stability_bars` consecutive bars), **all position sizes are halved and leverage is dropped to 1.0×**. This is a soft exit — the system stays invested but at half size until the HMM is confident again.
+There is no traditional entry trigger. The position is opened as soon as the HMM produces a confirmed regime. After that the portfolio is rebalanced whenever the regime changes or the EMA filter flips.
 
 ### Stop loss
 
-Every signal carries a stop computed fresh from the current bar's ATR and EMA:
+Every signal carries a stop computed from the current bar's ATR and EMA:
 
 | Regime | Stop formula |
 |---|---|
@@ -238,118 +326,13 @@ Every signal carries a stop computed fresh from the current bar's ATR and EMA:
 | Mid vol | `50EMA − 0.5×ATR` |
 | High vol | `50EMA − 1.0×ATR` |
 
-The stop floats upward with the EMA as the market rises — it is a trailing stop, not a fixed level.
+### Uncertainty discount
 
-### Exit / size reduction
-
-A full or partial size reduction is triggered by any of:
-
-1. **Regime transition to higher vol** — the orchestrator immediately rebalances to the new target weight (e.g. 95% → 60% when low-vol shifts to high-vol)
-2. **Confidence drops below threshold** — uncertainty discount applied (size halved)
-3. **Stop-loss hit** — the risk manager closes the position at the stop price
-4. **Risk circuit breaker** — daily / weekly drawdown limits force a size reduction or full halt (see Risk controls section)
-
-There is no take-profit target. Positions are held open-ended until one of the above triggers fires.
+If the HMM posterior is below `min_confidence`, the regime is flickering, or the new state is not yet confirmed, all position sizes are halved and leverage is dropped to 1.0×.
 
 ### Rebalance filter
 
-A rebalance is skipped if the new target weight is within 10% (relative) of the current weight. This prevents constant micro-trades when the regime is stable:
-
-```
-|new_weight − current_weight| < 0.10 × new_weight  →  skip
-```
-
----
-
-## Walk-forward backtesting
-
-The backtester uses a strict walk-forward methodology to prevent look-ahead bias:
-
-- **In-sample window**: configured per run — HMM fitted and parameters selected here
-- **Out-of-sample window**: never seen during tuning — strategy evaluated here
-- **Step size**: equal to the OOS window (non-overlapping test periods)
-- Equity is carried forward between folds (compounding)
-- Slippage: 5 bps round-trip per trade
-
-Performance metrics reported per fold and overall: CAGR, Sharpe ratio, max drawdown, annualised volatility, regime breakdown (% time, entries, average duration per regime), regime change count, transition matrix, and comparison to buy-and-hold and SMA-200 benchmarks.
-
----
-
-## Parameter optimisation and validation workflow
-
-A rigorous three-stage workflow prevents parameter snooping and produces honest out-of-sample results.
-
-### Stage 1 — Parameter sweep (tune on 2020–2023)
-
-```bash
-py -3.12 tools/param_sweep.py --asset-group stocks --start 2020-01-01 --end 2023-12-31
-```
-
-Runs 11 parameter variants on the **tuning window only**. The 2024+ data is never touched. Outputs a comparison table; winner = config with highest Sharpe on the tuning window.
-
-### Stage 2 — Forward test (blind hold-out 2024–today)
-
-```bash
-py -3.12 main.py backtest --asset-group stocks --start 2024-01-01 --compare
-```
-
-Single run on data that was never seen during tuning. If Sharpe and MaxDD here are close to the tuning window results, the parameters generalise. A large gap signals overfitting.
-
-### Stage 3 — Rolling Walk-Forward Optimisation (WFO)
-
-```bash
-py -3.12 tools/rolling_wfo.py --asset-group stocks --start 2020-01-01
-```
-
-The gold-standard validation. For each fold:
-
-```
-│←────── tune 12 months ──────→│← test 3 months (blind) →│
-                  │←────── tune 12 months ──────→│← test 3 months →│
-                                    │←────── tune 12 months ──────→│← test →│
-                                                       ...
-```
-
-- **Tune phase**: runs all parameter variants on the 12-month tune window; selects the winner by Sharpe
-- **Test phase**: applies the winning params blind to the next 3 months — data never seen during tuning
-- **Advances** by 3 months and repeats until today (~22 folds from 2020)
-- **4:1 ratio** (12m tune / 3m test) is the professional WFO standard
-
-#### What the WFO output tells you
-
-| Metric | Interpretation |
-|---|---|
-| `% folds beat Buy & Hold` | Core robustness score. ≥ 60% = deploy, 40–60% = paper trade first, < 40% = do not deploy |
-| Sharpe distribution (min/mean/max/std) | Wide std = inconsistent edge; tight std = stable strategy |
-| Parameter stability table | If the same config wins 10/17 folds, it's structurally sound. If a different config wins every fold, there is no stable edge |
-| Recommended live params | Winner of the **most recent fold only** — never averaged across folds |
-
-#### Live parameter selection rule
-
-> **Do not average parameters across folds.**
->
-> Use the winner from the most recent completed fold as current live parameters.
-> Retune every 3 months on a rolling basis.
-
-```
-Every 3 months:
-  1. Run param_sweep on the last 6 months of data
-  2. Deploy the winning config
-  3. Monitor vs previous params — if Sharpe degrades >20%, retune immediately
-```
-
-#### CLI options
-
-| Flag | Default | Description |
-|---|---|---|
-| `--asset-group` | stocks | Asset group to test |
-| `--start` | 2020-01-01 | First fold start date |
-| `--tune-months` | 12 | Tuning window length |
-| `--test-months` | 3 | Blind test window length |
-| `--step-months` | 3 | How far to advance each fold |
-| `--show-windows` | — | Print fold schedule and bar counts without running backtests |
-
-> **Runtime**: approximately 1.5–2 min per run × `n_variants` × `n_folds`. With default settings (9 variants, ~22 folds from 2020) expect 5–6 hours on a standard machine. Run overnight.
+A rebalance is skipped when the new target weight is within `rebalance_threshold` (relative) of the current weight. Default in `balanced` set: 18%.
 
 ---
 
@@ -357,47 +340,18 @@ Every 3 months:
 
 **Terminal dashboard** (`monitoring/dashboard.py`):
 - Refreshes every 5 seconds in a background daemon thread
-- Panels: header (time, market status), regime (label, confidence, stability, leverage), portfolio (equity, cash, P&L, exposure, peak DD), open positions table (10 columns), recent events log
+- Panels: header (time, market status), regime (label, confidence, stability, leverage), portfolio (equity, cash, P&L, exposure, peak DD), open positions table, recent events log
 
 **Structured logger** (`monitoring/logger.py`):
 - JSON lines format: `{"ts": "...", "level": "INFO", "event": "trade", ...}`
 - Rotating file handler: 50 MB max, 5 backup files
-- Domain helpers: `log_trade`, `log_fill`, `log_regime_change`, `log_rebalance`, `log_risk_event`, `log_error`
 
 **Alert manager** (`monitoring/alerts.py`):
 - Email via SMTP with STARTTLS (e.g. Gmail)
 - Slack-compatible webhook (also works with Teams, Discord)
 - Rate limiting: duplicate alerts within 15 minutes are silently dropped
-- Built-in helpers: `alert_drawdown_halt`, `alert_regime_change`, `alert_order_error`
 
 Credentials for alerts are read from the `alerts:` section of `credentials.yaml` or from environment variables (`ALERT_SMTP_HOST`, `ALERT_SMTP_USER`, `ALERT_SMTP_PASSWORD`, `ALERT_RECIPIENT`, `ALERT_WEBHOOK_URL`).
-
----
-
-## Data pipeline
-
-Historical bars are fetched from Alpaca's `StockHistoricalDataClient` and cached in memory by `(symbols, timeframe, start, end)`. The `FeatureEngineer` computes a strictly causal feature matrix (no future data leaks):
-
-| Feature | Description |
-|---|---|
-| `log_return` | Log of close[t] / close[t-1] |
-| `realized_vol_5d` | Rolling 5-bar std dev of log returns |
-| `realized_vol_21d` | Rolling 21-bar std dev of log returns |
-| `vol_ratio` | `realized_vol_5d / realized_vol_21d` — vol regime indicator |
-| `vol_of_vol` | Rolling std dev of `realized_vol_21d` — second-order vol |
-| `volume_norm` | Volume / rolling mean volume — relative activity |
-| `dist_sma200` | (price − SMA200) / SMA200 — distance from long-term trend |
-| `sma50_slope` | Rate of change of SMA50 over a short window — trend momentum |
-| `high_low_range` | (high − low) / close — intraday range normalised |
-| `close_position` | (close − low) / (high − low) — close position in the bar |
-| `overnight_gap` | open[t] / close[t-1] − 1 — gap risk |
-| `parkinson_vol` | Parkinson high-low volatility estimator |
-| `garman_klass_vol` | Garman-Klass OHLC volatility estimator |
-| `amihud_illiquidity` | \|log_return\| / volume — illiquidity proxy |
-
-All raw features are then z-scored over a rolling window before being fed to the HMM, so the model sees standardised inputs regardless of the absolute level of volatility.
-
-Live streaming uses `StockDataStream` (market data) and `TradingStream` (order fills), both running as async coroutines in background daemon threads.
 
 ---
 
@@ -410,13 +364,13 @@ To switch from paper to live:
 3. At startup you will be prompted to type exactly: `YES I UNDERSTAND THE RISKS`
 4. The system will refuse to start if the phrase is not entered correctly
 
-Live trading is otherwise identical to paper trading — same risk controls, same order logic.
-
 ---
 
 ## Development notes
 
 - **Python version**: 3.12 required (`hmmlearn` has no wheels for 3.13+)
-- **Windows terminal**: `Console(force_terminal=True, legacy_windows=False)` is used to avoid `UnicodeEncodeError` on cp1252 terminals
+- **Run scripts**: always use `py -3.12` on Windows, not `python`
+- **Windows terminal**: `Console(force_terminal=True, legacy_windows=False)` avoids `UnicodeEncodeError` on cp1252 terminals
 - **Test isolation**: all broker tests use `MagicMock(spec=AlpacaClient)` — no real network calls
 - **Async in sync codebase**: WebSocket streams run via `asyncio.new_event_loop()` in daemon threads, keeping the main trading loop synchronous
+- **hmmlearn convergence warnings**: silenced at `ERROR` level — the tiny negative deltas (~1e-5) are floating-point noise, not real divergence
