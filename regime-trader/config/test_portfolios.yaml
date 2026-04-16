@@ -1,0 +1,84 @@
+# test_portfolios.yaml — Pre-defined stock sets for backtesting.
+#
+# Usage (override broker.symbols at the CLI or in a test script):
+#   python main.py backtest  # then swap broker.symbols to one portfolio below
+#
+# Each portfolio is self-contained: it has a rationale, the symbol list,
+# and any parameter overrides that make sense given its character.
+# Override only parameters that meaningfully differ from settings.yaml defaults.
+
+portfolios:
+
+  # ── 1. Mega-cap Tech ──────────────────────────────────────────────────────────
+  # High-liquidity, high-correlation tech names.  Regime signal should be clean
+  # because these move together; good baseline for validating HMM state labelling.
+  mega_cap_tech:
+    description: "Mega-cap US tech — high liquidity, high intra-group correlation"
+    symbols:
+      - AAPL
+      - MSFT
+      - NVDA
+      - GOOGL
+      - META
+      - AMZN
+      - AMD
+      - TSLA
+    backtest_overrides:
+      benchmark_symbol: QQQ     # tech-heavy benchmark more representative than SPY
+
+  # ── 2. Sector ETF Breadth ─────────────────────────────────────────────────────
+  # One ETF per major GICS sector + broad market + bonds/gold.
+  # Tests whether HMM can distinguish macro regimes across uncorrelated assets.
+  sector_etf_breadth:
+    description: "SPDR sector ETFs + broad market — tests macro regime detection"
+    symbols:
+      - SPY    # broad market
+      - QQQ    # tech
+      - XLF    # financials
+      - XLE    # energy
+      - XLV    # health care
+      - XLI    # industrials
+      - XLU    # utilities (defensive)
+      - GLD    # gold (risk-off hedge)
+    backtest_overrides:
+      benchmark_symbol: SPY
+
+  # ── 3. High-Beta / Speculative Growth ────────────────────────────────────────
+  # Volatile names with wide regime swings.  Stresses the risk guardrails and
+  # drawdown halts; good for confirming high_vol_allocation / daily_dd_halt work.
+  high_beta_growth:
+    description: "Speculative / high-beta growth — stresses risk limits and HMM stability"
+    symbols:
+      - TSLA
+      - COIN
+      - MSTR
+      - PLTR
+      - RIVN
+      - SMCI
+      - SQ
+      - RBLX
+    backtest_overrides:
+      benchmark_symbol: QQQ
+      # Tighter slippage model not warranted; these are liquid enough intraday
+      # but widen in stress — raise slippage to be conservative
+      slippage_pct: 0.001       # 2× default
+
+  # ── 4. Defensive / Dividend Value ─────────────────────────────────────────────
+  # Low-beta, dividend-paying names.  HMM regimes will be compressed vs. tech;
+  # validates that the strategy doesn't over-trade in low-volatility environments.
+  defensive_value:
+    description: "Blue-chip defensives — validates low-vol regime behaviour and rebalance throttle"
+    symbols:
+      - JNJ
+      - KO
+      - WMT
+      - PG
+      - MCD
+      - VZ
+      - T
+      - MRK
+    backtest_overrides:
+      benchmark_symbol: SPY
+      # Lower leverage ceiling appropriate for low-vol portfolio
+      # (mirror this in risk section if running live)
+      # low_vol_leverage stays at 1.25 from settings.yaml — no override needed

@@ -42,16 +42,12 @@ print_menu() {
     echo -e "  ${GREEN}[3]${RESET}  Live / Paper     ${DIM}(start trading loop)${RESET}"
     echo ""
     echo -e "  ${YELLOW}── Backtesting ─────────────────────────────${RESET}"
+    echo -e "  ${GREEN}[0]${RESET}  Full Cycle       ${DIM}(HMM + backtest ALL 3 groups, summary table)${RESET}"
     echo -e "  ${GREEN}[4]${RESET}  Backtest Quick   ${DIM}(active group, 2020-now, no benchmark)${RESET}"
     echo -e "  ${GREEN}[5]${RESET}  Backtest Group   ${DIM}(active group, 2020-now, benchmark)${RESET}"
     echo -e "  ${GREEN}[6]${RESET}  Forward Test     ${DIM}(hold-out 2024-today, out-of-sample)${RESET}"
     echo ""
     echo -e "  ${GREEN}[8]${RESET}  Train + Backtest ${DIM}(retrain HMM then full benchmark, active group)${RESET}"
-    echo ""
-    echo -e "  ${YELLOW}── Optimisation ────────────────────────────${RESET}"
-    echo -e "  ${GREEN}[7]${RESET}  Param Sweep      ${DIM}(tune on 2020-2023, active group)${RESET}"
-    echo -e "  ${GREEN}[9]${RESET}  Rolling WFO      ${DIM}(12m tune / 3m test, 4:1 ratio, robustness check)${RESET}"
-    echo -e "  ${GREEN}[w]${RESET}  WFO Windows      ${DIM}(show fold schedule and bar counts — no backtests run)${RESET}"
     echo ""
     echo -e "  ${YELLOW}── Asset Groups ────────────────────────────${RESET}"
     echo -e "  ${BLUE}[g]${RESET}  Change Group     ${DIM}(stocks | crypto | indices)${RESET}"
@@ -166,6 +162,11 @@ while true; do
     print_menu
     read -rp "  Your choice: " choice
     case "$choice" in
+        0)
+            run_command \
+                "Full Cycle — HMM + Backtest for ALL 3 groups" \
+                "py -3.12 main.py full-cycle --start 2020-01-01"
+            ;;
         1)
             run_command \
                 "Train HMM — group: $ASSET_GROUP" \
@@ -196,20 +197,10 @@ while true; do
                 "Forward Test — group: $ASSET_GROUP  2024-today (hold-out)" \
                 "py -3.12 main.py backtest --asset-group $ASSET_GROUP --start 2024-01-01 --compare"
             ;;
-        7)
-            run_command \
-                "Parameter Sweep — group: $ASSET_GROUP  tune 2020-2023" \
-                "py -3.12 tools/param_sweep.py --asset-group $ASSET_GROUP --start 2020-01-01 --end 2023-12-31"
-            ;;
         8)
             run_command \
                 "Train HMM + Backtest — group: $ASSET_GROUP" \
                 "py -3.12 main.py trade --train-only --asset-group $ASSET_GROUP && py -3.12 main.py backtest --asset-group $ASSET_GROUP --start 2020-01-01 --compare"
-            ;;
-        9)
-            run_command \
-                "Rolling WFO — group: $ASSET_GROUP  (6m tune / 3m test)" \
-                "py -3.12 tools/rolling_wfo.py --asset-group $ASSET_GROUP --start 2020-01-01 --tune-months 12 --test-months 3 --step-months 3"
             ;;
         s|S)
             git_save
@@ -218,11 +209,6 @@ while true; do
             ;;
         g|G)
             select_group
-            ;;
-        w|W)
-            run_command \
-                "WFO Window Plan — group: $ASSET_GROUP" \
-                "py -3.12 tools/rolling_wfo.py --asset-group $ASSET_GROUP --start 2020-01-01 --tune-months 12 --test-months 3 --step-months 3 --show-windows"
             ;;
         q|Q)
             echo ""

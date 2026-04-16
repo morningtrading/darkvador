@@ -69,8 +69,8 @@ hmm:
 strategy:
   low_vol_allocation: 0.95
   mid_vol_allocation_trend: 0.95
-  mid_vol_allocation_no_trend: 0.70
-  high_vol_allocation: 0.70
+  mid_vol_allocation_no_trend: 0.75
+  high_vol_allocation: 0.75
   low_vol_leverage: 1.25
   rebalance_threshold: 0.15
   uncertainty_size_mult: 0.5

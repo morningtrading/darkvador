@@ -822,6 +822,13 @@ class TradingSession:
             current_regime=self._last_regime
         )
         self._equity_at_start = port_snapshot.total_equity
+
+        # Sync logger context
+        self.trade_logger.set_context(
+            regime      = self._last_regime,
+            equity      = port_snapshot.total_equity,
+            positions   = [p.symbol for p in port_snapshot.positions],
+        )
         _print(
             f"      {len(port_snapshot.positions)} open position(s)  "
             f"equity=${port_snapshot.total_equity:,.2f}",
@@ -1117,6 +1124,9 @@ class TradingSession:
 
             # ---- 6. Generate signals -----------------------------------------
             try:
+                # Sync current weights for rebalance filter
+                self.strategy.update_weights(self.position_tracker.get_current_weights())
+
                 raw_signals = self.strategy.generate_signals(
                     symbols       = symbols,
                     bars          = bars_by_symbol,
@@ -1260,6 +1270,15 @@ class TradingSession:
             # ---- 10. Dashboard refresh & position update --------------------
             try:
                 port_snap = self.position_tracker.update(self._last_regime)  # REST refresh
+
+                # Update logger context
+                self.trade_logger.set_context(
+                    regime      = self._last_regime,
+                    probability = confidence,
+                    equity      = port_snap.total_equity,
+                    positions   = [p.symbol for p in port_snap.positions],
+                )
+
                 from core.signal_generator import PortfolioSignal
                 from monitoring.dashboard import SystemStatus
                 portfolio_signal = PortfolioSignal(
@@ -1940,6 +1959,84 @@ def run_train_only(config: Dict, args: Optional[argparse.Namespace] = None) -> N
     client.disconnect()
 
 
+def run_full_cycle(config: Dict, args: argparse.Namespace) -> None:
+    """
+    Execute HMM training and full backtest for all asset groups (stocks, crypto, indices)
+    and display a consolidated summary.
+    """
+    console = _console()
+    asset_groups = ["stocks", "crypto", "indices"]
+    all_results = {}
+
+    _print("\n[bold magenta]Starting Full Cycle: HMM + Backtest for all Asset Groups[/bold magenta]", console)
+
+    for group in asset_groups:
+        _print(f"\n[bold yellow]>>> Processing Group: {group.upper()} <<<[/bold yellow]", console)
+        
+        # Create a copy of args to customize for each group
+        group_args = argparse.Namespace(**vars(args))
+        group_args.asset_group = group
+        group_args.compare = True
+        
+        # Force a fresh training for each group
+        # Note: run_backtest doesn't explicitly 'train' a global model, 
+        # it trains per-fold models inside the walk-forward loop.
+        
+        try:
+            # We wrap run_backtest to capture results or just let it print
+            # To get a summary, we can use the PerformanceAnalyzer directly after run_backtest
+            # Since run_backtest prints its own report, we can just call it.
+            run_backtest(config, group_args)
+            
+            # After run_backtest, the results are saved in a timestamped dir.
+            # For a consolidated summary, we'd need to collect metrics.
+            # Let's assume we want to show a final table of all 3.
+            
+            # Logic to extract last result's performance_summary.csv
+            output_dir = _SAVED_RESULTS_DIR
+            latest_run = sorted([d for d in output_dir.iterdir() if d.is_dir() and d.name.startswith("backtest_")])[-1]
+            summary_path = latest_run / "performance_summary.csv"
+            if summary_path.exists():
+                summary = pd.read_csv(summary_path, header=None, names=["metric", "value"])
+                all_results[group] = summary.set_index("metric")["value"].to_dict()
+
+        except Exception as exc:
+            _print(f"[red]Failed full cycle for {group}:[/red] {exc}", console)
+            continue
+
+    if all_results:
+        _print("\n[bold cyan]FINAL CROSS-ASSET SUMMARY[/bold cyan]", console)
+        try:
+            from rich.table import Table
+            from rich import box as rbox
+            tbl = Table(title="Asset Group Comparison", box=rbox.ROUNDED, header_style="bold yellow")
+            tbl.add_column("Metric", style="dim")
+            for group in all_results.keys():
+                tbl.add_column(group.upper(), justify="right")
+            
+            metrics_to_show = [
+                ("Total Return", "total_return", "{:+.2%}"),
+                ("Sharpe Ratio", "sharpe", "{:.3f}"),
+                ("Max Drawdown", "max_drawdown", "{:.2%}"),
+                ("Win Rate", "win_rate", "{:.2%}"),
+                ("Total Trades", "total_trades", "{:.0f}"),
+            ]
+            
+            for label, key, fmt in metrics_to_show:
+                row = [label]
+                for group in all_results.keys():
+                    val = all_results[group].get(key, "N/A")
+                    try:
+                        row.append(fmt.format(float(val)))
+                    except:
+                        row.append(str(val))
+                tbl.add_row(*row)
+            console.print(tbl)
+        except Exception as exc:
+            print("\nFinal Summary Data:")
+            print(all_results)
+
+
 def run_stress_test(config: Dict, args: argparse.Namespace) -> None:
     """Standalone stress-test entry point (delegates to run_backtest --stress-test)."""
     args.stress_test = True
@@ -2010,6 +2107,13 @@ def build_parser() -> argparse.ArgumentParser:
     stress_p.add_argument("--start",   default=None)
     stress_p.add_argument("--end",     default=None)
 
+    # ── full-cycle ────────────────────────────────────────────────────────────
+    full_p = sub.add_parser("full-cycle", help="Run backtest for all 3 asset groups (stocks, crypto, indices)")
+    full_p.add_argument("--config",    default="config/settings.yaml")
+    full_p.add_argument("--start",     default=None)
+    full_p.add_argument("--end",       default=None)
+    full_p.add_argument("--output",    default="results/")
+
     return parser
 
 
@@ -2038,6 +2142,9 @@ def main() -> None:
 
     elif args.command == "stress":
         run_stress_test(config, args)
+
+    elif args.command == "full-cycle":
+        run_full_cycle(config, args)
 
     else:
         parser.print_help()

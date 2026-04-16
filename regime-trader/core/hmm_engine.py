@@ -43,6 +43,7 @@ from scipy.special import logsumexp
 from scipy.stats import multivariate_normal
 
 logger = logging.getLogger(__name__)
+logging.getLogger("hmmlearn.hmm").setLevel(logging.ERROR)
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 
