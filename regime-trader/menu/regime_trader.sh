@@ -60,6 +60,9 @@ print_menu() {
     echo ""
     echo -e "  ${GREEN}[8]${RESET}  Train + Backtest ${DIM}(retrain HMM then full benchmark, active group)${RESET}"
     echo ""
+    echo -e "  ${YELLOW}── Analysis ────────────────────────────────${RESET}"
+    echo -e "  ${GREEN}[p]${RESET}  Interval Sweep   ${DIM}(find best min_rebalance_interval, active group)${RESET}"
+    echo ""
     echo -e "  ${YELLOW}── Config Sets ─────────────────────────────${RESET}"
     echo -e "  ${MAGENTA}[c]${RESET}  Config Set       ${DIM}(conservative | balanced | aggressive)${RESET}"
     echo ""
@@ -240,6 +243,11 @@ while true; do
             run_command \
                 "Train HMM + Backtest — group: $ASSET_GROUP" \
                 "py -3.12 main.py trade --train-only --asset-group $ASSET_GROUP && py -3.12 main.py backtest --asset-group $ASSET_GROUP --start 2020-01-01 --compare"
+            ;;
+        p|P)
+            run_command \
+                "Interval Sweep — group: $ASSET_GROUP  2020-now" \
+                "py -3.12 main.py sweep --asset-group $ASSET_GROUP --start 2020-01-01"
             ;;
         s|S)
             git_save

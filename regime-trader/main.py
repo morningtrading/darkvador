@@ -2078,6 +2078,241 @@ def run_full_cycle(config: Dict, args: argparse.Namespace) -> None:
             print(all_results)
 
 
+def run_interval_sweep(config: Dict, args: argparse.Namespace) -> None:
+    """
+    Sweep min_rebalance_interval values in-process.
+
+    Data is fetched ONCE. Because HMM training uses deterministic seeds
+    (random_state = seed * 13 + n_states) the exact same models are trained
+    for every interval value — only trade execution differs, giving a clean
+    apples-to-apples comparison.
+    """
+    from backtest.backtester import WalkForwardBacktester
+    from backtest.performance import PerformanceAnalyzer
+
+    console = _console()
+
+    # ── Parse sweep values ────────────────────────────────────────────────────
+    raw_values = getattr(args, "values", None) or "0,1,2,3,5,7,10,15,20"
+    try:
+        sweep_values = [int(v.strip()) for v in raw_values.split(",")]
+    except ValueError:
+        _print("[red]--values must be comma-separated integers, e.g. 0,1,3,5,10[/red]", console)
+        sys.exit(1)
+
+    symbols: List[str] = _resolve_symbols(
+        config,
+        asset_group=getattr(args, "asset_group", None),
+        symbols_arg=getattr(args, "symbols", None),
+    )
+
+    bt_cfg          = config.get("backtest", {})
+    start_date: str = getattr(args, "start", None) or "2018-01-01"
+    end_date: str   = getattr(args, "end",   None) or pd.Timestamp.today().strftime("%Y-%m-%d")
+
+    initial_capital = float(bt_cfg.get("initial_capital", 100_000))
+    slippage_pct    = float(bt_cfg.get("slippage_pct",    0.0005))
+    train_window    = int(bt_cfg.get("train_window",      252))
+    test_window     = int(bt_cfg.get("test_window",       126))
+    step_size       = int(bt_cfg.get("step_size",         126))
+    risk_free_rate  = float(bt_cfg.get("risk_free_rate",  0.045))
+
+    _print(
+        f"\n[bold cyan]min_rebalance_interval Sweep[/bold cyan]\n"
+        f"  Symbols : {', '.join(symbols[:6])}{'…' if len(symbols) > 6 else ''}\n"
+        f"  Period  : {start_date}  →  {end_date}\n"
+        f"  Values  : {sweep_values}",
+        console,
+    )
+
+    # ── Fetch data once ───────────────────────────────────────────────────────
+    api_key    = os.environ.get("ALPACA_API_KEY",    "")
+    secret_key = os.environ.get("ALPACA_SECRET_KEY", "")
+    if not api_key or not secret_key:
+        _print("[red]ERROR: Alpaca credentials not found.[/red]", console)
+        sys.exit(1)
+
+    _print("\nFetching historical data ...", console, style="dim")
+    try:
+        prices = _fetch_prices(symbols, start_date, end_date, api_key, secret_key)
+    except Exception as exc:
+        _print(f"[red]Data fetch failed:[/red] {exc}", console)
+        sys.exit(1)
+    _print(
+        f"  {len(prices)} bars  "
+        f"({prices.index[0].date()} → {prices.index[-1].date()})",
+        console, style="dim",
+    )
+
+    # ── Build configs (same for every sweep iteration) ────────────────────────
+    hmm_cfg_raw = config.get("hmm", {})
+    hmm_config = {
+        "n_candidates":      hmm_cfg_raw.get("n_candidates", [3, 4, 5]),
+        "n_init":            hmm_cfg_raw.get("n_init", 10),
+        "min_train_bars":    hmm_cfg_raw.get("min_train_bars", 120),
+        "stability_bars":    hmm_cfg_raw.get("stability_bars", 3),
+        "flicker_window":    hmm_cfg_raw.get("flicker_window", 20),
+        "flicker_threshold": hmm_cfg_raw.get("flicker_threshold", 4),
+        "min_confidence":    hmm_cfg_raw.get("min_confidence", 0.55),
+    }
+    strategy_config = {"strategy": config.get("strategy", {})}
+
+    common_bt_kwargs = dict(
+        symbols         = list(prices.columns),
+        initial_capital = initial_capital,
+        train_window    = train_window,
+        test_window     = test_window,
+        step_size       = step_size,
+        slippage_pct    = slippage_pct,
+        risk_free_rate  = risk_free_rate,
+        zscore_window        = int(bt_cfg.get("zscore_window",        60)),
+        sma_long             = int(bt_cfg.get("sma_long",            200)),
+        sma_trend            = int(bt_cfg.get("sma_trend",            50)),
+        volume_norm_window   = int(bt_cfg.get("volume_norm_window",    50)),
+    )
+
+    # ── Silence noisy logs during sweep ──────────────────────────────────────
+    logging.getLogger("hmmlearn").setLevel(logging.ERROR)
+    logging.getLogger("core.hmm_engine").setLevel(logging.WARNING)
+
+    pa = PerformanceAnalyzer(risk_free_rate=risk_free_rate, trading_days_per_year=252)
+
+    # ── Sweep ─────────────────────────────────────────────────────────────────
+    rows: List[Dict] = []
+    n = len(sweep_values)
+    for i, interval in enumerate(sweep_values):
+        if console:
+            console.print(f"  [{i+1}/{n}] interval={interval:>3} ...", style="dim", end="\r")
+        else:
+            print(f"  [{i+1}/{n}] interval={interval:>3} ...", end="\r", flush=True)
+        bt = WalkForwardBacktester(**common_bt_kwargs, min_rebalance_interval=interval)
+        try:
+            result = bt.run(prices, hmm_config=hmm_config, strategy_config=strategy_config)
+        except Exception as exc:
+            _print(f"\n[red]  interval={interval} failed:[/red] {exc}", console)
+            rows.append({"interval": interval, "error": str(exc)})
+            continue
+
+        rpt = pa.analyze(result)
+        rows.append({
+            "interval": interval,
+            "sharpe":   rpt.sharpe_ratio,
+            "cagr":     rpt.cagr if rpt.cagr is not None else float("nan"),
+            "max_dd":   rpt.max_drawdown,
+            "calmar":   rpt.calmar_ratio if rpt.calmar_ratio is not None else float("nan"),
+            "trades":   rpt.total_trades,
+            "final_eq": result.final_equity,
+        })
+
+    _print("", console)  # clear the \r line
+
+    if not rows or all("error" in r for r in rows):
+        _print("[red]All sweep iterations failed.[/red]", console)
+        return
+
+    # ── Find winner (best Sharpe among successful runs) ───────────────────────
+    ok_rows   = [r for r in rows if "error" not in r]
+    best_row  = max(ok_rows, key=lambda r: r["sharpe"])
+    best_iv   = best_row["interval"]
+
+    # ── Rich results table ────────────────────────────────────────────────────
+    try:
+        from rich.table import Table
+        from rich import box as rbox
+        from rich.text import Text
+
+        tbl = Table(
+            title=f"min_rebalance_interval Sweep — {', '.join(symbols[:4])}{'…' if len(symbols) > 4 else ''}",
+            box=rbox.ROUNDED,
+            header_style="bold cyan",
+        )
+        tbl.add_column("Interval",  justify="right")
+        tbl.add_column("Sharpe",    justify="right")
+        tbl.add_column("CAGR",      justify="right")
+        tbl.add_column("Max DD",    justify="right")
+        tbl.add_column("Calmar",    justify="right")
+        tbl.add_column("Trades",    justify="right")
+        tbl.add_column("Final $",   justify="right")
+
+        for r in rows:
+            is_best   = r.get("interval") == best_iv and "error" not in r
+            row_style = "bold green" if is_best else ""
+
+            if "error" in r:
+                tbl.add_row(
+                    str(r["interval"]), "[red]ERROR[/red]", "", "", "", "", r["error"][:40],
+                )
+                continue
+
+            iv_cell = (
+                Text(f"{r['interval']:>3} ★", style="bold green")
+                if is_best
+                else str(r["interval"])
+            )
+            tbl.add_row(
+                iv_cell,
+                Text(f"{r['sharpe']:>6.3f}", style=row_style),
+                Text(f"{r['cagr']:>+7.2%}", style=row_style),
+                Text(f"{r['max_dd']:>7.2%}", style=row_style),
+                Text(f"{r['calmar']:>6.3f}", style=row_style),
+                Text(f"{r['trades']:>6d}",   style=row_style),
+                Text(f"${r['final_eq']:>12,.0f}", style=row_style),
+            )
+
+        if console:
+            console.print(tbl)
+        else:
+            # Fallback plain text
+            print(f"\n{'Interval':>9}  {'Sharpe':>7}  {'CAGR':>8}  {'MaxDD':>7}  {'Calmar':>7}  {'Trades':>7}  {'Final $':>12}")
+            for r in rows:
+                if "error" in r:
+                    print(f"{r['interval']:>9}  ERROR")
+                    continue
+                marker = " ★" if r["interval"] == best_iv else "  "
+                print(
+                    f"{r['interval']:>9}{marker}"
+                    f"  {r['sharpe']:>7.3f}"
+                    f"  {r['cagr']:>+8.2%}"
+                    f"  {r['max_dd']:>7.2%}"
+                    f"  {r['calmar']:>7.3f}"
+                    f"  {r['trades']:>7d}"
+                    f"  ${r['final_eq']:>12,.0f}"
+                )
+
+    except ImportError:
+        print("\nInterval  Sharpe  CAGR     MaxDD   Calmar  Trades   Final $")
+        for r in rows:
+            if "error" in r:
+                print(f"{r['interval']:>8}  ERROR")
+                continue
+            marker = "★" if r["interval"] == best_iv else " "
+            print(
+                f"{r['interval']:>8}{marker}"
+                f"  {r['sharpe']:>6.3f}"
+                f"  {r['cagr']:>+7.2%}"
+                f"  {r['max_dd']:>6.2%}"
+                f"  {r['calmar']:>6.3f}"
+                f"  {r['trades']:>6d}"
+                f"  ${r['final_eq']:>12,.0f}"
+            )
+
+    _print(
+        f"\n[bold green]Winner: interval={best_iv}[/bold green]  "
+        f"Sharpe={best_row['sharpe']:.3f}  "
+        f"CAGR={best_row['cagr']:+.2%}  "
+        f"MaxDD={best_row['max_dd']:.2%}  "
+        f"Trades={best_row['trades']}",
+        console,
+    )
+
+    # ── Save to CSV ───────────────────────────────────────────────────────────
+    _SAVED_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    ts = dt.datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    out_path = _SAVED_RESULTS_DIR / f"interval_sweep_{ts}.csv"
+    pd.DataFrame(ok_rows).to_csv(out_path, index=False)
+    _print(f"  Saved → {out_path}", console, style="dim")
+
+
 def run_stress_test(config: Dict, args: argparse.Namespace) -> None:
     """Standalone stress-test entry point (delegates to run_backtest --stress-test)."""
     args.stress_test = True
@@ -2163,6 +2398,25 @@ def build_parser() -> argparse.ArgumentParser:
     full_p.add_argument("--set",       default=None, dest="config_set",
                          help="Config set to apply")
 
+    # ── sweep ─────────────────────────────────────────────────────────────────
+    sweep_p = sub.add_parser(
+        "sweep",
+        help="Sweep min_rebalance_interval — fetch data once, compare all values",
+    )
+    sweep_p.add_argument("--config",      default="config/settings.yaml")
+    sweep_p.add_argument("--asset-group", default=None, dest="asset_group",
+                          help="Asset group (stocks | crypto | indices)")
+    sweep_p.add_argument("--symbols",     default=None,
+                          help="Comma-separated symbols — overrides asset-group")
+    sweep_p.add_argument("--start",       default=None,
+                          help="Start date ISO-8601 (e.g. 2019-01-01)")
+    sweep_p.add_argument("--end",         default=None,
+                          help="End date ISO-8601 (default: today)")
+    sweep_p.add_argument("--values",      default="0,1,2,3,5,7,10,15,20",
+                          help="Comma-separated interval values to test (default: 0,1,2,3,5,7,10,15,20)")
+    sweep_p.add_argument("--set",         default=None, dest="config_set",
+                          help="Config set to apply (conservative | balanced | aggressive)")
+
     return parser
 
 
@@ -2194,6 +2448,9 @@ def main() -> None:
 
     elif args.command == "full-cycle":
         run_full_cycle(config, args)
+
+    elif args.command == "sweep":
+        run_interval_sweep(config, args)
 
     else:
         parser.print_help()
