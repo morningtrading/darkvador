@@ -563,19 +563,18 @@ def _train_hmm(
         sym_bars, feature_names=_hmm_feature_names(hmm_cfg)
     )
 
-    # Blend log_ret_1 and realized_vol_20 across all basket symbols
+    # Blend log_ret_1 and realized_vol_20 across equity-like basket symbols.
+    # Non-equity symbols (e.g. GLD, TLT, USO) are excluded via hmm_cfg.blend_exclude.
+    _blend_exclude = set(hmm_cfg.get("blend_exclude", []))
+    _blend_syms = [s for s in symbols if s not in _blend_exclude]
     _blend_cols = [c for c in ["log_ret_1", "realized_vol_20"]
                    if c in features_clean.columns]
-    if len(symbols) > 1 and _blend_cols:
-        _valid_syms = [s for s in symbols if s != ref_symbol]
+    if len(_blend_syms) > 1 and _blend_cols:
         _per_sym_dfs = []
-        _per_sym_keys = [ref_symbol]
-        _per_sym_dfs.append(
-            fe.build_feature_matrix(sym_bars, feature_names=_blend_cols, dropna=False)
-        )
-        for _s in _valid_syms:
+        _per_sym_keys = []
+        for _s in _blend_syms:
             try:
-                _sb = _extract_sym(bars_df, _s)
+                _sb = sym_bars if _s == ref_symbol else _extract_sym(bars_df, _s)
                 _per_sym_dfs.append(
                     fe.build_feature_matrix(_sb, feature_names=_blend_cols, dropna=False)
                 )
@@ -980,14 +979,15 @@ class TradingSession:
                 _feat_df = _fe.build_feature_matrix(
                     _ref_df, feature_names=_hmm_feature_names(hmm_cfg)
                 )
-                # Blend log_ret_1 / realized_vol_20 across basket symbols
+                # Blend log_ret_1 / realized_vol_20 across equity-like symbols
+                _sp_exclude = set(hmm_cfg.get("blend_exclude", []))
                 _blend_cols = [c for c in ["log_ret_1", "realized_vol_20"]
                                if c in _feat_df.columns]
                 if len(symbols) > 1 and _blend_cols:
                     _sp_dfs  = [_fe.build_feature_matrix(_ref_df, feature_names=_blend_cols, dropna=False)]
                     _sp_keys = [_ref_sym]
                     for _s in symbols:
-                        if _s == _ref_sym:
+                        if _s == _ref_sym or _s in _sp_exclude:
                             continue
                         _sb = _pred_bars.get(_s)
                         if _sb is not None and len(_sb) >= 10:
@@ -1165,14 +1165,15 @@ class TradingSession:
                 features_clean = fe.build_feature_matrix(
                     ref_bars, feature_names=_hmm_feature_names(hmm_cfg)
                 )
-                # Blend log_ret_1 / realized_vol_20 across all basket symbols
+                # Blend log_ret_1 / realized_vol_20 across equity-like symbols
+                _lp_exclude = set(hmm_cfg.get("blend_exclude", []))
                 _blend_cols = [c for c in ["log_ret_1", "realized_vol_20"]
                                if c in features_clean.columns]
                 if len(symbols) > 1 and _blend_cols:
                     _lp_dfs  = [fe.build_feature_matrix(ref_bars, feature_names=_blend_cols, dropna=False)]
                     _lp_keys = [ref_sym]
                     for _s in symbols:
-                        if _s == ref_sym:
+                        if _s == ref_sym or _s in _lp_exclude:
                             continue
                         _sb = bars_by_symbol.get(_s)
                         if _sb is not None and len(_sb) >= 10:

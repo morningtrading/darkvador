@@ -39,6 +39,13 @@ from data.feature_engineering import FeatureEngineer, hmm_feature_names as _hmm_
 
 logger = logging.getLogger(__name__)
 
+# Regimes where stop-losses are NOT enforced even when enforce_stops=True.
+# In trending (bullish) regimes, ATR stops fire on normal pullbacks and cut
+# off return without protecting against the drawdowns they are designed to avoid.
+_STOP_EXEMPT_REGIMES = frozenset({
+    "NEUTRAL", "BULL", "WEAK_BULL", "STRONG_BULL", "EUPHORIA",
+})
+
 # ── Default configurations ─────────────────────────────────────────────────────
 
 _DEFAULT_HMM_CFG: Dict = dict(
@@ -228,6 +235,7 @@ class WalkForwardBacktester:
         strategy_config: Optional[Dict] = None,
         risk_config: Optional[Dict] = None,
         progress_callback=None,
+        enforce_stops: bool = False,
     ) -> BacktestResult:
         """
         Execute the full walk-forward backtest.
@@ -277,6 +285,24 @@ class WalkForwardBacktester:
             feature_names=_hmm_feature_names(hmm_cfg),
             dropna=False,
         )
+
+        # Blend log_ret_1 and realized_vol_20 across equity-like symbols so the
+        # HMM sees a basket-level return/vol signal rather than a single proxy.
+        # vol_ratio, adx_14, dist_sma200 remain market_sym-anchored (trend info).
+        # Non-equity assets (GLD, TLT, USO …) are excluded via hmm_cfg.blend_exclude
+        # because they respond to different macro drivers and add noise.
+        _blend_exclude = set(hmm_cfg.get("blend_exclude", []))
+        _blend_syms = [s for s in syms if s not in _blend_exclude]
+        _blend_cols = [c for c in ["log_ret_1", "realized_vol_20"]
+                       if c in full_features_raw.columns]
+        if len(_blend_syms) > 1 and _blend_cols:
+            _per_sym = pd.concat(
+                [fe.build_feature_matrix(ohlcv[s], feature_names=_blend_cols, dropna=False)
+                 for s in _blend_syms],
+                axis=1, keys=_blend_syms,
+            )
+            for col in _blend_cols:
+                full_features_raw[col] = _per_sym.xs(col, level=1, axis=1).mean(axis=1)
 
         # ── Identify clean rows (all features non-NaN) ────────────────────────
         clean_mask = full_features_raw.notna().all(axis=1)
@@ -342,6 +368,7 @@ class WalkForwardBacktester:
                 wr = self._run_single_window(
                     fold_id, prices, ohlcv, is_features, oos_features,
                     equity, hmm_cfg, strat_cfg,
+                    enforce_stops=enforce_stops,
                 )
             except Exception as exc:
                 logger.error("Fold %d failed: %s — skipping.", fold_id, exc, exc_info=True)
@@ -451,6 +478,7 @@ class WalkForwardBacktester:
         start_equity: float,
         hmm_cfg: Dict,
         strat_cfg: Dict,
+        enforce_stops: bool = False,
     ) -> WindowResult:
         """
         Execute one walk-forward fold.
@@ -498,6 +526,10 @@ class WalkForwardBacktester:
         # pending stores target weights (not shares) for 1-bar fill delay
         pending: Optional[Dict] = None
         bars_since_rebalance: int = self.min_rebalance_interval  # allow first rebalance immediately
+        # stop_prices tracks the active stop level per symbol (enforce_stops only)
+        stop_prices: Dict[str, float] = {}
+        # current_regime from previous bar — used for regime-conditional stop gate
+        current_regime: str = ""
 
         oos_timestamps = list(oos_features.index)
 
@@ -513,6 +545,39 @@ class WalkForwardBacktester:
                     val = prices.loc[bar_date, s]
                     if pd.notna(val) and val > 0:
                         cur_px[s] = float(val)
+
+            # ── 5-stop. Stop-loss check (before pending, enforce_stops only) ──
+            # Stops are suppressed in bullish/neutral regimes where ATR pullbacks
+            # are normal and stops would cut off return without reducing tail risk.
+            if enforce_stops and current_regime not in _STOP_EXEMPT_REGIMES:
+                for sym in list(stop_prices.keys()):
+                    price = cur_px.get(sym)
+                    if price is None or shares.get(sym, 0.0) <= 0:
+                        stop_prices.pop(sym, None)
+                        continue
+                    if price <= stop_prices[sym]:
+                        fill_px = price * (1.0 - self.slippage_pct)
+                        proceeds = shares[sym] * fill_px
+                        cash += proceeds
+                        logger.info(
+                            "STOP_OUT fold=%d %s @ %.2f (stop=%.2f)",
+                            fold_id, sym, price, stop_prices[sym],
+                        )
+                        trades.append({
+                            "fold": fold_id,
+                            "timestamp": bar_date,
+                            "symbol": sym,
+                            "action": "STOP_OUT",
+                            "delta_shares": -shares[sym],
+                            "fill_price": fill_px,
+                            "trade_value": proceeds,
+                            "slippage_cost": shares[sym] * price * self.slippage_pct,
+                            "regime": regime_dict.get(bar_date, ""),
+                            "regime_prob": 0.0,
+                            "target_weight": 0.0,
+                        })
+                        shares[sym] = 0.0
+                        stop_prices.pop(sym)
 
             # ── 5a. Execute pending rebalance (fill-delay = 1 bar) ────────────
             if pending is not None:
@@ -544,6 +609,12 @@ class WalkForwardBacktester:
                         "target_weight": target_wt,
                     })
 
+                # Transfer stop levels from executed signals into stop_prices
+                if enforce_stops:
+                    for sym, sl in pending.get("stop_losses", {}).items():
+                        if shares.get(sym, 0.0) > 0:
+                            stop_prices[sym] = sl
+
                 # Sync orchestrator with post-execution actual weights
                 equity_post = cash + sum(
                     shares[s] * cur_px.get(s, 0.0) for s in self.symbols
@@ -574,6 +645,7 @@ class WalkForwardBacktester:
             regime_state = engine.update(oos_features.values[t], bar_date)
             is_flickering = engine.is_flickering()
             regime_dict[bar_date] = regime_state.label
+            current_regime = regime_state.label   # used by stop gate on next bar
 
             # ── 5d. Build per-symbol OHLCV windows for signal generation ──────
             bars_for_signal: Dict[str, pd.DataFrame] = {}
@@ -600,6 +672,7 @@ class WalkForwardBacktester:
                         sig.symbol: sig.position_size_pct * sig.leverage
                         for sig in signals
                     },
+                    "stop_losses": {sig.symbol: sig.stop_loss for sig in signals},
                     "regime": regime_state.label,
                     "regime_prob": regime_state.probability,
                 }
@@ -629,6 +702,7 @@ class WalkForwardBacktester:
         fitted_engine: "HMMEngine",
         strat_cfg: Dict,
         min_conf: float,
+        enforce_stops: bool = False,
     ) -> WindowResult:
         """
         Replay OOS simulation using a *pre-fitted* engine.
@@ -671,6 +745,8 @@ class WalkForwardBacktester:
         prev_equity: float = start_equity
         pending = None
         bars_since_rebalance: int = self.min_rebalance_interval
+        stop_prices: Dict[str, float] = {}
+        current_regime: str = ""   # regime from previous bar for stop gate
 
         oos_timestamps = list(oos_features.index)
 
@@ -684,6 +760,38 @@ class WalkForwardBacktester:
                     val = prices.loc[bar_date, s]
                     if pd.notna(val) and val > 0:
                         cur_px[s] = float(val)
+
+            # Stop-loss check (before pending, enforce_stops only).
+            # Suppressed in bullish/neutral regimes — see _STOP_EXEMPT_REGIMES.
+            if enforce_stops and current_regime not in _STOP_EXEMPT_REGIMES:
+                for sym in list(stop_prices.keys()):
+                    price = cur_px.get(sym)
+                    if price is None or shares.get(sym, 0.0) <= 0:
+                        stop_prices.pop(sym, None)
+                        continue
+                    if price <= stop_prices[sym]:
+                        fill_px = price * (1.0 - self.slippage_pct)
+                        proceeds = shares[sym] * fill_px
+                        cash += proceeds
+                        logger.info(
+                            "STOP_OUT fold=%d %s @ %.2f (stop=%.2f)",
+                            fold_id, sym, price, stop_prices[sym],
+                        )
+                        trades.append({
+                            "fold": fold_id,
+                            "timestamp": bar_date,
+                            "symbol": sym,
+                            "action": "STOP_OUT",
+                            "delta_shares": -shares[sym],
+                            "fill_price": fill_px,
+                            "trade_value": proceeds,
+                            "slippage_cost": shares[sym] * price * self.slippage_pct,
+                            "regime": regime_dict.get(bar_date, ""),
+                            "regime_prob": 0.0,
+                            "target_weight": 0.0,
+                        })
+                        shares[sym] = 0.0
+                        stop_prices.pop(sym)
 
             # Execute pending (1-bar fill delay)
             if pending is not None:
@@ -714,6 +822,11 @@ class WalkForwardBacktester:
                         "regime_prob": pending["regime_prob"],
                         "target_weight": target_wt,
                     })
+                if enforce_stops:
+                    for sym, sl in pending.get("stop_losses", {}).items():
+                        if shares.get(sym, 0.0) > 0:
+                            stop_prices[sym] = sl
+
                 equity_post = cash + sum(
                     shares[s] * cur_px.get(s, 0.0) for s in self.symbols
                 )
@@ -736,6 +849,7 @@ class WalkForwardBacktester:
             regime_state  = engine.update(oos_features.values[t], bar_date)
             is_flickering = engine.is_flickering()
             regime_dict[bar_date] = regime_state.label
+            current_regime = regime_state.label   # used by stop gate on next bar
 
             bars_for_signal: Dict = {}
             for s in self.symbols:
@@ -757,6 +871,7 @@ class WalkForwardBacktester:
                         sig.symbol: sig.position_size_pct * sig.leverage
                         for sig in signals
                     },
+                    "stop_losses": {sig.symbol: sig.stop_loss for sig in signals},
                     "regime": regime_state.label,
                     "regime_prob": regime_state.probability,
                 }
@@ -783,6 +898,7 @@ class WalkForwardBacktester:
         hmm_config: Optional[Dict] = None,
         strategy_config: Optional[Dict] = None,
         progress_callback=None,
+        enforce_stops: bool = False,
     ) -> "List[Tuple[float, int, BacktestResult]]":
         """
         2-D grid sweep over ``min_confidence`` × ``stability_bars``.
@@ -823,6 +939,23 @@ class WalkForwardBacktester:
             feature_names=_hmm_feature_names(hmm_cfg),
             dropna=False,
         )
+
+        # Blend log_ret_1 and realized_vol_20 across all symbols so the HMM sees
+        # a basket-level return/vol signal rather than a single proxy.
+        # Non-equity assets excluded via hmm_cfg.blend_exclude (see run()).
+        _blend_exclude = set(hmm_cfg.get("blend_exclude", []))
+        _blend_syms = [s for s in syms if s not in _blend_exclude]
+        _blend_cols = [c for c in ["log_ret_1", "realized_vol_20"]
+                       if c in full_features_raw.columns]
+        if len(_blend_syms) > 1 and _blend_cols:
+            _per_sym = pd.concat(
+                [fe.build_feature_matrix(ohlcv[s], feature_names=_blend_cols, dropna=False)
+                 for s in _blend_syms],
+                axis=1, keys=_blend_syms,
+            )
+            for col in _blend_cols:
+                full_features_raw[col] = _per_sym.xs(col, level=1, axis=1).mean(axis=1)
+
         clean_mask     = full_features_raw.notna().all(axis=1)
         clean_features = full_features_raw[clean_mask]
         n_clean        = len(clean_features)
@@ -863,6 +996,7 @@ class WalkForwardBacktester:
                 fold_id, prices, ohlcv, is_feat, oos_feat,
                 equity, engine, strat_cfg,
                 min_conf=hmm_cfg.get("min_confidence", 0.55),
+                enforce_stops=enforce_stops,
             )
             trained.append((fold_id, engine, is_feat, oos_feat, equity))
             if len(base_wr.equity_curve) > 0:
@@ -894,6 +1028,7 @@ class WalkForwardBacktester:
                         wr = self._run_oos_sim(
                             fold_id, prices, ohlcv, is_feat, oos_feat,
                             cell_equity, eng, strat_cfg, min_conf=conf,
+                            enforce_stops=enforce_stops,
                         )
                     except Exception as exc:
                         logger.warning("Grid cell (conf=%.2f stab=%d) fold %d failed: %s",

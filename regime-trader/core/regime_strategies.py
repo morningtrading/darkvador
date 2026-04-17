@@ -543,6 +543,23 @@ class StrategyOrchestrator:
         self._low_vol_leverage: float     = strategy_cfg.get("low_vol_leverage", 1.25)
         self._uncertainty_mult: float     = strategy_cfg.get("uncertainty_size_mult", 0.50)
 
+        # SMA-200 trend gate: when the market proxy is above its 200-bar SMA,
+        # upgrade defensive/neutral regimes to reflect the trending environment.
+        #   HighVolDefensive → MidVolCautious  (downgrade from fully defensive)
+        #   MidVolCautious   → LowVolBull      (upgrade to fully invested)
+        # Set sma_trend_gate: false to disable.
+        self._sma_gate: bool = strategy_cfg.get("sma_trend_gate", True)
+        self._sma_gate_mid_strategy: BaseStrategy = MidVolCautiousStrategy(
+            allocation_above_ema=self._mid_trend_allocation,
+            allocation_below_ema=self._mid_notrd_allocation,
+        )
+        self._sma_gate_bull_strategy: BaseStrategy = LowVolBullStrategy(
+            allocation=self._low_vol_allocation,
+            leverage=self._low_vol_leverage,
+        )
+        # Keep backward-compatible alias
+        self._sma_gate_strategy = self._sma_gate_mid_strategy
+
         # regime_id → BaseStrategy
         self._regime_to_strategy: Dict[int, BaseStrategy] = {}
         # regime_id → normalised vol rank (0.0 = calmest, 1.0 = most volatile)
@@ -647,6 +664,33 @@ class StrategyOrchestrator:
                 regime_state.label,
             )
             return []
+
+        # ── SMA-200 trend gate ────────────────────────────────────────────────
+        # When the market proxy is above its 200-bar SMA the broad trend is
+        # intact.  Defensive/neutral regimes are upgraded to reflect this:
+        #   HighVolDefensive → MidVolCautious  (stop cutting so hard)
+        #   MidVolCautious   → LowVolBull      (fully invest; trend is clear)
+        if self._sma_gate and isinstance(strategy, (HighVolDefensiveStrategy, MidVolCautiousStrategy)):
+            mkt_sym = symbols[0] if symbols else None
+            mkt_bars = bars.get(mkt_sym) if mkt_sym else None
+            if mkt_bars is not None and len(mkt_bars) >= 200:
+                close  = mkt_bars["close"]
+                sma200 = close.iloc[-200:].mean()
+                if close.iloc[-1] > sma200:
+                    if isinstance(strategy, HighVolDefensiveStrategy):
+                        logger.info(
+                            "SMA gate: regime=%s %s %.2f > SMA200 %.2f"
+                            " → MidVolCautious",
+                            regime_state.label, mkt_sym, close.iloc[-1], sma200,
+                        )
+                        strategy = self._sma_gate_mid_strategy
+                    else:  # MidVolCautious
+                        logger.info(
+                            "SMA gate: regime=%s %s %.2f > SMA200 %.2f"
+                            " → LowVolBull",
+                            regime_state.label, mkt_sym, close.iloc[-1], sma200,
+                        )
+                        strategy = self._sma_gate_bull_strategy
 
         uncertainty = (
             regime_state.probability < self.min_confidence
