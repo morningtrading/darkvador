@@ -522,7 +522,8 @@ def _train_hmm(
     # Add 40% buffer for weekends/holidays
     lookback_days = max(10, int(n_bars / bars_per_day * 1.4 * 7 / 5) + 5)
 
-    # Use the first symbol (benchmark) to build the feature matrix
+    # Fetch all symbols so log_ret_1 / realized_vol_20 can be basket-blended.
+    # vol_ratio, adx_14, dist_sma200 remain anchored to the reference symbol.
     ref_symbol = symbols[0]
     end   = pd.Timestamp.now(tz="UTC").strftime("%Y-%m-%dT%H:%M:%SZ")
     start = (pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=lookback_days)).strftime(
@@ -530,32 +531,61 @@ def _train_hmm(
     )
 
     bars_df = client.get_bars(
-        symbols=[ref_symbol],
+        symbols=symbols,
         timeframe=tf,
         start=start,
         end=end,
     )
 
     if bars_df.empty:
-        raise RuntimeError(f"No bars returned for {ref_symbol} during HMM training")
+        raise RuntimeError(f"No bars returned during HMM training")
 
-    # Flatten multi-index to single-symbol OHLCV
-    if isinstance(bars_df.index, pd.MultiIndex):
-        sym_bars = bars_df.xs(ref_symbol, level="symbol") if ref_symbol in bars_df.index.get_level_values("symbol") else bars_df.droplevel(0)
-    else:
-        sym_bars = bars_df
+    def _extract_sym(df, sym):
+        if isinstance(df.index, pd.MultiIndex):
+            lvl_vals = df.index.get_level_values("symbol")
+            if sym in lvl_vals:
+                out = df.xs(sym, level="symbol")
+            else:
+                out = df.droplevel(0)
+        else:
+            out = df
+        out = out.copy()
+        out.index = pd.to_datetime(out.index).tz_localize(None)
+        out = out.sort_index()
+        if "volume" not in out.columns:
+            out["volume"] = 1_000_000.0
+        return out
 
-    sym_bars.index = pd.to_datetime(sym_bars.index).tz_localize(None)
-    sym_bars = sym_bars.sort_index()
-
-    # Add synthetic volume if missing
-    if "volume" not in sym_bars.columns:
-        sym_bars["volume"] = 1_000_000.0
+    sym_bars = _extract_sym(bars_df, ref_symbol)
 
     fe = FeatureEngineer()
     features_clean = fe.build_feature_matrix(
         sym_bars, feature_names=_hmm_feature_names(hmm_cfg)
     )
+
+    # Blend log_ret_1 and realized_vol_20 across all basket symbols
+    _blend_cols = [c for c in ["log_ret_1", "realized_vol_20"]
+                   if c in features_clean.columns]
+    if len(symbols) > 1 and _blend_cols:
+        _valid_syms = [s for s in symbols if s != ref_symbol]
+        _per_sym_dfs = []
+        _per_sym_keys = [ref_symbol]
+        _per_sym_dfs.append(
+            fe.build_feature_matrix(sym_bars, feature_names=_blend_cols, dropna=False)
+        )
+        for _s in _valid_syms:
+            try:
+                _sb = _extract_sym(bars_df, _s)
+                _per_sym_dfs.append(
+                    fe.build_feature_matrix(_sb, feature_names=_blend_cols, dropna=False)
+                )
+                _per_sym_keys.append(_s)
+            except Exception:
+                pass
+        if len(_per_sym_keys) > 1:
+            _per_sym = pd.concat(_per_sym_dfs, axis=1, keys=_per_sym_keys)
+            for col in _blend_cols:
+                features_clean[col] = _per_sym.xs(col, level=1, axis=1).mean(axis=1)
 
     if len(features_clean) < hmm_cfg.get("min_train_bars", 252):
         raise RuntimeError(
@@ -937,7 +967,7 @@ class TradingSession:
         try:
             _ref_sym   = symbols[0]
             _tf        = broker_cfg.get("timeframe", "5Min")
-            _pred_bars = _fetch_live_bars(self.client, [_ref_sym], _tf, n_bars=300)
+            _pred_bars = _fetch_live_bars(self.client, symbols, _tf, n_bars=300)
             _ref_df    = _pred_bars.get(_ref_sym)
             if _ref_df is None:
                 _startup_notes = [f"Startup predict: no bars returned for {_ref_sym}"]
@@ -950,6 +980,26 @@ class TradingSession:
                 _feat_df = _fe.build_feature_matrix(
                     _ref_df, feature_names=_hmm_feature_names(hmm_cfg)
                 )
+                # Blend log_ret_1 / realized_vol_20 across basket symbols
+                _blend_cols = [c for c in ["log_ret_1", "realized_vol_20"]
+                               if c in _feat_df.columns]
+                if len(symbols) > 1 and _blend_cols:
+                    _sp_dfs  = [_fe.build_feature_matrix(_ref_df, feature_names=_blend_cols, dropna=False)]
+                    _sp_keys = [_ref_sym]
+                    for _s in symbols:
+                        if _s == _ref_sym:
+                            continue
+                        _sb = _pred_bars.get(_s)
+                        if _sb is not None and len(_sb) >= 10:
+                            try:
+                                _sp_dfs.append(_fe.build_feature_matrix(_sb, feature_names=_blend_cols, dropna=False))
+                                _sp_keys.append(_s)
+                            except Exception:
+                                pass
+                    if len(_sp_keys) > 1:
+                        _sp = pd.concat(_sp_dfs, axis=1, keys=_sp_keys)
+                        for _col in _blend_cols:
+                            _feat_df[_col] = _sp.xs(_col, level=1, axis=1).mean(axis=1)
                 if len(_feat_df) < 10:
                     _startup_notes = [f"Startup predict: only {len(_feat_df)} clean feature rows (need 10)"]
                 else:
@@ -1115,6 +1165,26 @@ class TradingSession:
                 features_clean = fe.build_feature_matrix(
                     ref_bars, feature_names=_hmm_feature_names(hmm_cfg)
                 )
+                # Blend log_ret_1 / realized_vol_20 across all basket symbols
+                _blend_cols = [c for c in ["log_ret_1", "realized_vol_20"]
+                               if c in features_clean.columns]
+                if len(symbols) > 1 and _blend_cols:
+                    _lp_dfs  = [fe.build_feature_matrix(ref_bars, feature_names=_blend_cols, dropna=False)]
+                    _lp_keys = [ref_sym]
+                    for _s in symbols:
+                        if _s == ref_sym:
+                            continue
+                        _sb = bars_by_symbol.get(_s)
+                        if _sb is not None and len(_sb) >= 10:
+                            try:
+                                _lp_dfs.append(fe.build_feature_matrix(_sb, feature_names=_blend_cols, dropna=False))
+                                _lp_keys.append(_s)
+                            except Exception:
+                                pass
+                    if len(_lp_keys) > 1:
+                        _lp = pd.concat(_lp_dfs, axis=1, keys=_lp_keys)
+                        for _col in _blend_cols:
+                            features_clean[_col] = _lp.xs(_col, level=1, axis=1).mean(axis=1)
                 if len(features_clean) < 10:
                     logger.warning("Too few clean feature rows -- skipping bar")
                     continue
@@ -1711,6 +1781,7 @@ def run_backtest(config: Dict, args: argparse.Namespace) -> None:
             hmm_config=hmm_config,
             strategy_config=strategy_config,
             progress_callback=_make_bt_progress(len(list(prices.columns))),
+            enforce_stops=getattr(args, "enforce_stops", False),
         )
     except Exception as exc:
         _print(f"[red]Backtest failed:[/red] {exc}", console)
@@ -2638,8 +2709,10 @@ def build_parser() -> argparse.ArgumentParser:
                        help="Start date ISO-8601 (e.g. 2019-01-01)")
     bt_p.add_argument("--end",         default=None,
                        help="End date ISO-8601 (default: today)")
-    bt_p.add_argument("--compare",     action="store_true",
+    bt_p.add_argument("--compare",        action="store_true",
                        help="Add benchmark comparison table")
+    bt_p.add_argument("--enforce-stops",  action="store_true", dest="enforce_stops",
+                       help="Enforce stop-loss exits during OOS simulation")
     bt_p.add_argument("--stress-test", action="store_true", dest="stress_test",
                        help="Run stress scenarios after the backtest")
     bt_p.add_argument("--set",         default=None, dest="config_set",
