@@ -25,11 +25,10 @@ asset_groups:
   - DIA
   - IWM
   - GLD
-  - TLT
   - EFA
   - EEM
   - VNQ
-  - USO
+  - EWG
 broker:
   paper_trading: true
   asset_group: stocks
@@ -68,8 +67,6 @@ hmm:
   - realized_vol_20
   blend_exclude:           # symbols excluded from log_ret_1 / realized_vol_20 blending
   - GLD                    # non-equity assets add cross-asset noise to the HMM feature blend
-  - TLT
-  - USO
 strategy:
   low_vol_allocation: 0.95
   mid_vol_allocation_trend: 0.95
