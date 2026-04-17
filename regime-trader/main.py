@@ -1758,6 +1758,23 @@ def run_backtest(config: Dict, args: argparse.Namespace) -> None:
         )
         _print(f"  Regime counts  :{_regime_lines}", console, style="dim")
 
+    # ── Per-regime P&L attribution ────────────────────────────────────────────
+    if result.combined_regime_pnl:
+        _label_order = [
+            "CRASH", "STRONG_BEAR", "BEAR", "WEAK_BEAR",
+            "NEUTRAL",
+            "WEAK_BULL", "BULL", "STRONG_BULL", "EUPHORIA",
+        ]
+        _sorted_pnl = sorted(
+            result.combined_regime_pnl.items(),
+            key=lambda kv: (_label_order.index(kv[0]) if kv[0] in _label_order else 99),
+        )
+        _pnl_lines = "".join(
+            f"\n    {lbl:<14} {'+' if pnl >= 0 else ''}{pnl:>10,.0f}"
+            for lbl, pnl in _sorted_pnl
+        )
+        _print(f"  Regime P&L     :{_pnl_lines}", console, style="dim")
+
     _print("\n", console)
     pa = PerformanceAnalyzer(
         risk_free_rate=risk_free_rate,

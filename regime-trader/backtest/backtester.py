@@ -59,7 +59,7 @@ _DEFAULT_STRAT_CFG: Dict = {
         "high_vol_allocation": 0.60,
         "low_vol_leverage": 1.25,
         "uncertainty_size_mult": 0.50,
-        "rebalance_threshold": 0.10,
+        "rebalance_threshold": 0.18,
     }
 }
 
@@ -102,6 +102,22 @@ def _ohlcv_from_close(close: pd.Series) -> pd.DataFrame:
     )
 
 
+# ── P&L attribution helper ────────────────────────────────────────────────────
+
+def _compute_regime_pnl(
+    returns_dict: Dict,
+    equity_curve: Dict,
+    regime_dict: Dict,
+) -> Dict[str, float]:
+    """Sum dollar P&L (equity × daily_return) per regime label for one fold."""
+    regime_pnl: Dict[str, float] = {}
+    for ts, ret in returns_dict.items():
+        label = regime_dict.get(ts, "UNKNOWN")
+        eq = equity_curve.get(ts, 0.0)
+        regime_pnl[label] = regime_pnl.get(label, 0.0) + eq * ret
+    return regime_pnl
+
+
 # ── Data structures ────────────────────────────────────────────────────────────
 
 @dataclass
@@ -117,6 +133,7 @@ class WindowResult:
     regime_series: pd.Series       # regime label per bar
     trades: List[Dict]             # list of trade records
     n_hmm_states: int              # states selected by BIC
+    regime_pnl: Dict[str, float] = field(default_factory=dict)  # label → dollar P&L
 
 
 @dataclass
@@ -129,6 +146,7 @@ class BacktestResult:
     initial_capital: float
     final_equity: float
     metadata: Dict = field(default_factory=dict)
+    combined_regime_pnl: Dict[str, float] = field(default_factory=dict)  # label → dollar P&L across all folds
 
 
 # ── Main class ─────────────────────────────────────────────────────────────────
@@ -165,8 +183,8 @@ class WalkForwardBacktester:
     fill_delay :
         Bars between signal generation and execution (default 1).
     zscore_window :
-        Rolling window for feature z-score standardisation (default 60,
-        shorter than the live default of 252 to limit warmup consumption).
+        Rolling window for feature z-score standardisation (matches live
+        default of 252 so backtest and live features are on the same distribution).
     """
 
     def __init__(
@@ -179,7 +197,7 @@ class WalkForwardBacktester:
         slippage_pct: float = 0.0005,
         risk_free_rate: float = 0.045,
         fill_delay: int = 1,
-        zscore_window: int = 60,
+        zscore_window: int = 252,  # aligned with live FeatureEngineer default
         sma_long: int = 200,
         sma_trend: int = 50,
         volume_norm_window: int = 50,
@@ -356,6 +374,11 @@ class WalkForwardBacktester:
         ).sort_index()
         all_trades = [t for w in fold_results for t in w.trades]
 
+        combined_regime_pnl: Dict[str, float] = {}
+        for wr in fold_results:
+            for label, pnl in wr.regime_pnl.items():
+                combined_regime_pnl[label] = combined_regime_pnl.get(label, 0.0) + pnl
+
         result = BacktestResult(
             windows=fold_results,
             combined_equity=combined_equity,
@@ -374,6 +397,7 @@ class WalkForwardBacktester:
                 "slippage_pct": self.slippage_pct,
                 "hmm_config": hmm_cfg,
             },
+            combined_regime_pnl=combined_regime_pnl,
         )
         self._results = result
         return result
@@ -591,6 +615,7 @@ class WalkForwardBacktester:
             regime_series=pd.Series(regime_dict, name="regime"),
             trades=trades,
             n_hmm_states=engine._n_states,
+            regime_pnl=_compute_regime_pnl(returns_dict, equity_curve, regime_dict),
         )
 
     def _run_oos_sim(
@@ -747,6 +772,7 @@ class WalkForwardBacktester:
             regime_series=pd.Series(regime_dict, name="regime"),
             trades=trades,
             n_hmm_states=engine._n_states,
+            regime_pnl=_compute_regime_pnl(returns_dict, equity_curve, regime_dict),
         )
 
     def run_grid(
@@ -890,6 +916,11 @@ class WalkForwardBacktester:
                 ).sort_index()
                 all_trades = [t for w in fold_results for t in w.trades]
 
+                cell_regime_pnl: Dict[str, float] = {}
+                for wr in fold_results:
+                    for label, pnl in wr.regime_pnl.items():
+                        cell_regime_pnl[label] = cell_regime_pnl.get(label, 0.0) + pnl
+
                 bt_result = BacktestResult(
                     windows=fold_results,
                     combined_equity=combined_equity,
@@ -910,6 +941,7 @@ class WalkForwardBacktester:
                                          "min_confidence": conf,
                                          "stability_bars": stab},
                     },
+                    combined_regime_pnl=cell_regime_pnl,
                 )
                 results.append((conf, stab, bt_result))
 
