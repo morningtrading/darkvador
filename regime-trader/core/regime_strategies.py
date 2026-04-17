@@ -666,31 +666,22 @@ class StrategyOrchestrator:
             return []
 
         # ── SMA-200 trend gate ────────────────────────────────────────────────
-        # When the market proxy is above its 200-bar SMA the broad trend is
-        # intact.  Defensive/neutral regimes are upgraded to reflect this:
-        #   HighVolDefensive → MidVolCautious  (stop cutting so hard)
-        #   MidVolCautious   → LowVolBull      (fully invest; trend is clear)
-        if self._sma_gate and isinstance(strategy, (HighVolDefensiveStrategy, MidVolCautiousStrategy)):
+        # If the HMM picked a fully defensive (HighVol) strategy but the market
+        # proxy is still above its 200-bar SMA, the trend has not broken down —
+        # downgrade to MidVolCautious instead of cutting to 60% allocation.
+        if self._sma_gate and isinstance(strategy, HighVolDefensiveStrategy):
             mkt_sym = symbols[0] if symbols else None
             mkt_bars = bars.get(mkt_sym) if mkt_sym else None
             if mkt_bars is not None and len(mkt_bars) >= 200:
                 close  = mkt_bars["close"]
                 sma200 = close.iloc[-200:].mean()
                 if close.iloc[-1] > sma200:
-                    if isinstance(strategy, HighVolDefensiveStrategy):
-                        logger.info(
-                            "SMA gate: regime=%s %s %.2f > SMA200 %.2f"
-                            " → MidVolCautious",
-                            regime_state.label, mkt_sym, close.iloc[-1], sma200,
-                        )
-                        strategy = self._sma_gate_mid_strategy
-                    else:  # MidVolCautious
-                        logger.info(
-                            "SMA gate: regime=%s %s %.2f > SMA200 %.2f"
-                            " → LowVolBull",
-                            regime_state.label, mkt_sym, close.iloc[-1], sma200,
-                        )
-                        strategy = self._sma_gate_bull_strategy
+                    logger.info(
+                        "SMA gate: regime=%s %s %.2f > SMA200 %.2f"
+                        " → MidVolCautious",
+                        regime_state.label, mkt_sym, close.iloc[-1], sma200,
+                    )
+                    strategy = self._sma_gate_mid_strategy
 
         uncertainty = (
             regime_state.probability < self.min_confidence
