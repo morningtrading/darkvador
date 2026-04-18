@@ -2158,7 +2158,7 @@ def run_full_cycle(config: Dict, args: argparse.Namespace) -> None:
                     val = all_results[group].get(key, "N/A")
                     try:
                         row.append(fmt.format(float(val)))
-                    except:
+                    except (ValueError, TypeError):
                         row.append(str(val))
                 tbl.add_row(*row)
             console.print(tbl)
