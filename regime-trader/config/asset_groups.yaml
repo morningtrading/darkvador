@@ -1,12 +1,3 @@
-# ─────────────────────────────────────────────────────────────
-#  Asset Groups — single source of truth
-#  Managed by: core/asset_groups.py
-#  CLI:        py -3.12 main.py groups <list|show|add|remove|edit|...>
-#  Schema:
-#    version:  integer (bump on breaking changes)
-#    default:  name of the default group (used when no --asset-group passed)
-#    groups:   mapping of name -> {description, asset_class, tags[], symbols[]}
-# ─────────────────────────────────────────────────────────────
 version: 1
 default: stocks
 groups:

@@ -2706,6 +2706,181 @@ def run_stress_test(config: Dict, args: argparse.Namespace) -> None:
     run_backtest(config, args)
 
 
+# ── Asset groups CLI ───────────────────────────────────────────────────────────
+
+def _split_csv(value: Optional[str]) -> List[str]:
+    if not value:
+        return []
+    return [s.strip() for s in value.split(",") if s.strip()]
+
+
+def run_groups(args: argparse.Namespace) -> int:
+    """Dispatcher for `main.py groups <action>`. Returns exit code."""
+    from core.asset_groups import AssetGroup, load_default_registry
+
+    reg = load_default_registry(reload=True)
+    action = args.groups_action
+    console = _console()
+
+    def _print_table(groups):
+        try:
+            from rich.table import Table
+            t = Table(title="Asset Groups", show_lines=False)
+            t.add_column("name", style="cyan")
+            t.add_column("class")
+            t.add_column("tags", style="dim")
+            t.add_column("#", justify="right")
+            t.add_column("symbols", overflow="fold")
+            default_name = reg.default()
+            for g in groups:
+                marker = " [green]*[/green]" if g.name == default_name else ""
+                t.add_row(
+                    g.name + marker,
+                    g.asset_class or "-",
+                    ",".join(g.tags) or "-",
+                    str(len(g.symbols)),
+                    ", ".join(g.symbols),
+                )
+            if console:
+                console.print(t)
+                console.print(f"  [dim]default: {default_name}  (marked with *)[/dim]")
+            else:
+                for g in groups:
+                    print(f"{g.name}\t{len(g.symbols)}\t{','.join(g.symbols)}")
+        except Exception:
+            for g in groups:
+                print(f"{g.name}\t{len(g.symbols)}\t{','.join(g.symbols)}")
+
+    if action == "list":
+        if getattr(args, "names_only", False):
+            for name in reg.list():
+                print(name)
+            return 0
+        if getattr(args, "json", False):
+            print(json.dumps(
+                {"default": reg.default(),
+                 "groups": {n: g.to_dict() for n, g in reg.all().items()}},
+                indent=2))
+            return 0
+        _print_table(list(reg.all().values()))
+        return 0
+
+    if action == "show":
+        if not reg.has(args.name):
+            _print(f"[red]Group not found:[/red] {args.name}", console)
+            return 1
+        g = reg.get(args.name)
+        if getattr(args, "json", False):
+            print(json.dumps({args.name: g.to_dict()}, indent=2))
+        else:
+            _print_table([g])
+        return 0
+
+    if action == "add":
+        group = AssetGroup(
+            name=args.name,
+            symbols=tuple(_split_csv(args.symbols)),
+            description=args.description,
+            asset_class=args.asset_class,
+            tags=tuple(_split_csv(args.tags)),
+        )
+        try:
+            reg.add(group, overwrite=args.overwrite)
+        except ValueError as exc:
+            _print(f"[red]{exc}[/red]", console)
+            return 1
+        _print(f"[green]Added[/green] group '{args.name}' with {len(group.symbols)} symbols.", console)
+        return 0
+
+    if action == "remove":
+        try:
+            reg.remove(args.name)
+        except KeyError as exc:
+            _print(f"[red]{exc}[/red]", console)
+            return 1
+        _print(f"[yellow]Removed[/yellow] group '{args.name}'.", console)
+        return 0
+
+    if action == "edit":
+        try:
+            updated = reg.update(
+                args.name,
+                symbols=_split_csv(args.symbols) if args.symbols is not None else None,
+                add_symbols=_split_csv(args.add_symbols) if args.add_symbols else None,
+                remove_symbols=_split_csv(args.remove_symbols) if args.remove_symbols else None,
+                description=args.description,
+                asset_class=args.asset_class,
+                tags=_split_csv(args.tags) if args.tags is not None else None,
+            )
+        except KeyError as exc:
+            _print(f"[red]{exc}[/red]", console)
+            return 1
+        _print(f"[green]Updated[/green] '{args.name}' → {len(updated.symbols)} symbols.", console)
+        return 0
+
+    if action == "rename":
+        try:
+            reg.rename(args.old, args.new)
+        except (KeyError, ValueError) as exc:
+            _print(f"[red]{exc}[/red]", console)
+            return 1
+        _print(f"[green]Renamed[/green] '{args.old}' → '{args.new}'.", console)
+        return 0
+
+    if action == "set-default":
+        try:
+            reg.set_default(args.name)
+        except KeyError as exc:
+            _print(f"[red]{exc}[/red]", console)
+            return 1
+        _print(f"[green]Default group set to[/green] '{args.name}'.", console)
+        return 0
+
+    if action == "default":
+        print(reg.default())
+        return 0
+
+    if action == "validate":
+        errs = reg.validate()
+        if not errs:
+            _print("[green]OK[/green] — no problems detected.", console)
+            return 0
+        for e in errs:
+            _print(f"[red]•[/red] {e}", console)
+        return 1
+
+    if action == "export":
+        payload = {
+            "version": 1,
+            "default": reg.default(),
+            "groups": {n: g.to_dict() for n, g in reg.all().items()},
+        }
+        text = json.dumps(payload, indent=2)
+        if args.out:
+            Path(args.out).write_text(text, encoding="utf-8")
+            _print(f"[green]Wrote[/green] {args.out}", console)
+        else:
+            print(text)
+        return 0
+
+    if action == "import":
+        data = json.loads(Path(args.path).read_text(encoding="utf-8"))
+        groups = data.get("groups", data)  # allow either {groups: ...} or flat mapping
+        added = 0
+        for name, body in groups.items():
+            g = AssetGroup.from_dict(name, body)
+            try:
+                reg.add(g, overwrite=args.overwrite)
+                added += 1
+            except ValueError as exc:
+                _print(f"[yellow]skip[/yellow] {name}: {exc}", console)
+        _print(f"[green]Imported[/green] {added} group(s) from {args.path}.", console)
+        return 0
+
+    _print(f"[red]Unknown groups action:[/red] {action}", console)
+    return 1
+
+
 # ── CLI ────────────────────────────────────────────────────────────────────────
 
 def _asset_group_help() -> str:
@@ -2819,6 +2994,62 @@ def build_parser() -> argparse.ArgumentParser:
                        help="Comma-separated stability_bars values (default: 3,5,7,9,12)")
     cs_p.add_argument("--set",         default=None, dest="config_set")
 
+    # ── groups ────────────────────────────────────────────────────────────────
+    groups_p = sub.add_parser(
+        "groups",
+        help="Manage asset groups (config/asset_groups.yaml)",
+        description="List, inspect, create, edit and remove asset groups.",
+    )
+    groups_sub = groups_p.add_subparsers(dest="groups_action", required=True)
+
+    g_list = groups_sub.add_parser("list", help="List all asset groups")
+    g_list.add_argument("--names-only", action="store_true",
+                        help="Emit bare names, one per line (for scripts)")
+    g_list.add_argument("--json", action="store_true", help="Emit JSON")
+
+    g_show = groups_sub.add_parser("show", help="Show one group in detail")
+    g_show.add_argument("name")
+    g_show.add_argument("--json", action="store_true")
+
+    g_add = groups_sub.add_parser("add", help="Create a new group")
+    g_add.add_argument("name")
+    g_add.add_argument("--symbols", required=True, help="Comma-separated list")
+    g_add.add_argument("--description", default="")
+    g_add.add_argument("--asset-class", default="", dest="asset_class")
+    g_add.add_argument("--tags", default="", help="Comma-separated tags")
+    g_add.add_argument("--overwrite", action="store_true")
+
+    g_rm = groups_sub.add_parser("remove", help="Delete a group")
+    g_rm.add_argument("name")
+
+    g_edit = groups_sub.add_parser("edit", help="Edit an existing group")
+    g_edit.add_argument("name")
+    g_edit.add_argument("--symbols", default=None, help="Replace full symbol list")
+    g_edit.add_argument("--add-symbols", default=None, dest="add_symbols")
+    g_edit.add_argument("--remove-symbols", default=None, dest="remove_symbols")
+    g_edit.add_argument("--description", default=None)
+    g_edit.add_argument("--asset-class", default=None, dest="asset_class")
+    g_edit.add_argument("--tags", default=None, help="Replace tags (comma-separated)")
+
+    g_rn = groups_sub.add_parser("rename", help="Rename a group")
+    g_rn.add_argument("old")
+    g_rn.add_argument("new")
+
+    g_def = groups_sub.add_parser("set-default", help="Set the default group")
+    g_def.add_argument("name")
+
+    g_defp = groups_sub.add_parser("default", help="Print the default group name")
+
+    g_val = groups_sub.add_parser("validate", help="Validate the groups file")
+
+    g_exp = groups_sub.add_parser("export", help="Export groups as JSON")
+    g_exp.add_argument("--out", default=None, help="Write to file instead of stdout")
+
+    g_imp = groups_sub.add_parser("import", help="Import groups from a JSON file")
+    g_imp.add_argument("path")
+    g_imp.add_argument("--overwrite", action="store_true",
+                        help="Overwrite existing groups with same name")
+
     # ── sweep ─────────────────────────────────────────────────────────────────
     sweep_p = sub.add_parser(
         "sweep",
@@ -2847,6 +3078,11 @@ def main() -> None:
 
     parser = build_parser()
     args   = parser.parse_args()
+
+    # `groups` is a pure management command — does not need trading config
+    # or Alpaca credentials.
+    if args.command == "groups":
+        sys.exit(run_groups(args))
 
     config = load_config(args.config, set_name=getattr(args, "config_set", None))
     load_credentials()
