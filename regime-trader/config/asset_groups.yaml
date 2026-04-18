@@ -21,3 +21,8 @@ groups:
     asset_class: equity
     tags: [midcap, growth, us]
     symbols: [AXON, CRDO, FIX, POWL, KTOS, CACI, AEIS, ONTO, FTAI, IBP]
+  forex_etf:
+    description: Forex exposure via NYSE-listed ETFs (tradable through Alpaca)
+    asset_class: forex_etf
+    tags: [fx, etf]
+    symbols: [UUP, UDN, FXE, FXB, FXY, FXF, FXC, FXA, CYB, CEW]
