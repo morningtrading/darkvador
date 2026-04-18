@@ -647,15 +647,19 @@ class OrderExecutor:
             for o in orders:
                 if str(o.type) in ("stop", "stop_limit") and o.stop_price:
                     return float(o.stop_price)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Failed to fetch stop price for %s: %s", symbol, exc)
         return None
 
     def _size_from_signal(self, signal, price: float) -> float:
         """Convert signal.position_size_pct to whole shares."""
         try:
             equity = self.client.get_portfolio_value()
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "get_portfolio_value() failed, using $100k fallback for sizing: %s",
+                exc,
+            )
             equity = 100_000.0   # safe fallback
         shares = (equity * signal.position_size_pct) / max(price, 1e-9)
         return float(int(shares))   # floor to whole shares
