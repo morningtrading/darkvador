@@ -2708,6 +2708,18 @@ def run_stress_test(config: Dict, args: argparse.Namespace) -> None:
 
 # ── CLI ────────────────────────────────────────────────────────────────────────
 
+def _asset_group_help() -> str:
+    """Generate --asset-group help text listing current registered groups."""
+    try:
+        from core.asset_groups import load_default_registry
+        names = load_default_registry(reload=True).list()
+    except Exception:
+        names = []
+    if not names:
+        return "Asset group name from config/asset_groups.yaml"
+    return f"Asset group from config ({' | '.join(names)})"
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="regime-trader",
@@ -2738,7 +2750,7 @@ def build_parser() -> argparse.ArgumentParser:
     trade_p.add_argument("--train-only",   action="store_true", dest="train_only",
                           help="Train HMM on latest data and exit")
     trade_p.add_argument("--asset-group",  default=None, dest="asset_group",
-                          help="Asset group from config (stocks | crypto | indices | midcap)")
+                          help=_asset_group_help())
     trade_p.add_argument("--symbols",      default=None,
                           help="Comma-separated symbols — overrides asset-group")
     trade_p.add_argument("--set",          default=None, dest="config_set",
@@ -2750,7 +2762,7 @@ def build_parser() -> argparse.ArgumentParser:
     bt_p.add_argument("--output",      default="results/",
                        help="Directory for output CSVs (default: results/)")
     bt_p.add_argument("--asset-group", default=None, dest="asset_group",
-                       help="Asset group from config (stocks | crypto | indices | midcap)")
+                       help=_asset_group_help())
     bt_p.add_argument("--symbols",     default=None,
                        help="Comma-separated symbols — overrides asset-group")
     bt_p.add_argument("--start",       default=None,
@@ -2771,7 +2783,7 @@ def build_parser() -> argparse.ArgumentParser:
     stress_p.add_argument("--config",      default="config/settings.yaml")
     stress_p.add_argument("--output",      default="results/")
     stress_p.add_argument("--asset-group", default=None, dest="asset_group",
-                           help="Asset group from config (stocks | crypto | indices | midcap)")
+                           help=_asset_group_help())
     stress_p.add_argument("--symbols",     default=None,
                            help="Comma-separated symbols — overrides asset-group")
     stress_p.add_argument("--start",       default=None)
@@ -2795,7 +2807,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     cs_p.add_argument("--config",      default="config/settings.yaml")
     cs_p.add_argument("--asset-group", default=None, dest="asset_group",
-                       help="Asset group from config (stocks | crypto | indices | midcap)")
+                       help=_asset_group_help())
     cs_p.add_argument("--symbols",     default=None)
     cs_p.add_argument("--start",       default=None)
     cs_p.add_argument("--end",         default=None)
@@ -2814,7 +2826,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sweep_p.add_argument("--config",      default="config/settings.yaml")
     sweep_p.add_argument("--asset-group", default=None, dest="asset_group",
-                          help="Asset group from config (stocks | crypto | indices | midcap)")
+                          help=_asset_group_help())
     sweep_p.add_argument("--symbols",     default=None,
                           help="Comma-separated symbols — overrides asset-group")
     sweep_p.add_argument("--start",       default=None,
