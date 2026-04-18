@@ -2673,7 +2673,7 @@ def build_parser() -> argparse.ArgumentParser:
     trade_p.add_argument("--train-only",   action="store_true", dest="train_only",
                           help="Train HMM on latest data and exit")
     trade_p.add_argument("--asset-group",  default=None, dest="asset_group",
-                          help="Asset group from config (stocks | crypto | indices)")
+                          help="Asset group from config (stocks | crypto | indices | midcap)")
     trade_p.add_argument("--symbols",      default=None,
                           help="Comma-separated symbols — overrides asset-group")
     trade_p.add_argument("--set",          default=None, dest="config_set",
@@ -2685,7 +2685,7 @@ def build_parser() -> argparse.ArgumentParser:
     bt_p.add_argument("--output",      default="results/",
                        help="Directory for output CSVs (default: results/)")
     bt_p.add_argument("--asset-group", default=None, dest="asset_group",
-                       help="Asset group from config (stocks | crypto | indices)")
+                       help="Asset group from config (stocks | crypto | indices | midcap)")
     bt_p.add_argument("--symbols",     default=None,
                        help="Comma-separated symbols — overrides asset-group")
     bt_p.add_argument("--start",       default=None,
@@ -2729,7 +2729,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="2-D grid sweep: min_confidence × stability_bars (trains once per fold)",
     )
     cs_p.add_argument("--config",      default="config/settings.yaml")
-    cs_p.add_argument("--asset-group", default=None, dest="asset_group")
+    cs_p.add_argument("--asset-group", default=None, dest="asset_group",
+                       help="Asset group from config (stocks | crypto | indices | midcap)")
     cs_p.add_argument("--symbols",     default=None)
     cs_p.add_argument("--start",       default=None)
     cs_p.add_argument("--end",         default=None)
@@ -2748,7 +2749,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sweep_p.add_argument("--config",      default="config/settings.yaml")
     sweep_p.add_argument("--asset-group", default=None, dest="asset_group",
-                          help="Asset group (stocks | crypto | indices)")
+                          help="Asset group from config (stocks | crypto | indices | midcap)")
     sweep_p.add_argument("--symbols",     default=None,
                           help="Comma-separated symbols — overrides asset-group")
     sweep_p.add_argument("--start",       default=None,
