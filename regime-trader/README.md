@@ -51,7 +51,6 @@ regime-trader/
 │   ├── settings.yaml          # Base parameters (universe, risk, HMM, backtest)
 │   ├── credentials.yaml       # Alpaca API keys — git-ignored, never commit
 │   ├── active_set             # Name of the active config set (e.g. "balanced")
-│   ├── test_portfolios.yaml   # Four curated stock sets for comparative backtests
 │   └── sets/
 │       ├── conservative.yaml  # Low-churn, capital-preservation overrides
 │       ├── balanced.yaml      # Fixes main issues — recommended default
@@ -207,26 +206,6 @@ strategy:
 ```
 
 Then activate it with `--set my_set` or by updating `config/active_set`.
-
----
-
-## Test portfolios
-
-Four pre-defined stock universes for comparative backtests are in `config/test_portfolios.yaml`:
-
-| Portfolio | Symbols | Tests |
-|---|---|---|
-| `mega_cap_tech` | AAPL MSFT NVDA GOOGL META AMZN AMD TSLA | Baseline — clean regime signal, high liquidity |
-| `sector_etf_breadth` | SPY QQQ XLF XLE XLV XLI XLU GLD | Macro regime detection across uncorrelated sectors |
-| `high_beta_growth` | TSLA COIN MSTR PLTR RIVN SMCI SQ RBLX | Stress-tests risk limits and HMM flicker handling |
-| `defensive_value` | JNJ KO WMT PG MCD VZ T MRK | Validates low-vol regime behaviour and rebalance throttle |
-
-Run any portfolio directly:
-
-```bash
-py -3.12 main.py backtest --symbols AAPL,MSFT,NVDA,GOOGL,META,AMZN,AMD,TSLA --start 2020-01-01
-py -3.12 main.py backtest --symbols SPY,QQQ,XLF,XLE,XLV,XLI,XLU,GLD --start 2020-01-01
-```
 
 ---
 

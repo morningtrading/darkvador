@@ -17,7 +17,8 @@
       "Bash(py -3.12 main.py trade --train-only)",
       "Bash(py -3.12 main.py trade --train-only --asset-group stocks)",
       "Bash(py -3.12 main.py backtest --asset-group stocks --start 2020-01-01 --compare)",
-      "Bash(PYTHONIOENCODING=utf-8 py -3.12 main.py backtest --asset-group stocks --start 2020-01-01 --compare)"
+      "Bash(PYTHONIOENCODING=utf-8 py -3.12 main.py backtest --asset-group stocks --start 2020-01-01 --compare)",
+      "mcp__Claude_in_Chrome__tabs_context_mcp"
     ]
   }
 }
