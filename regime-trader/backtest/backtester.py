@@ -35,6 +35,7 @@ import pandas as pd
 
 from core.hmm_engine import HMMEngine
 from core.regime_strategies import StrategyOrchestrator
+from data.feature_blending import blend_cross_symbol_features
 from data.feature_engineering import FeatureEngineer, hmm_feature_names as _hmm_feature_names
 
 logger = logging.getLogger(__name__)
@@ -289,20 +290,14 @@ class WalkForwardBacktester:
         # Blend log_ret_1 and realized_vol_20 across equity-like symbols so the
         # HMM sees a basket-level return/vol signal rather than a single proxy.
         # vol_ratio, adx_14, dist_sma200 remain market_sym-anchored (trend info).
-        # Non-equity assets (GLD, TLT, USO …) are excluded via hmm_cfg.blend_exclude
-        # because they respond to different macro drivers and add noise.
-        _blend_exclude = set(hmm_cfg.get("blend_exclude", []))
-        _blend_syms = [s for s in syms if s not in _blend_exclude]
-        _blend_cols = [c for c in ["log_ret_1", "realized_vol_20"]
-                       if c in full_features_raw.columns]
-        if len(_blend_syms) > 1 and _blend_cols:
-            _per_sym = pd.concat(
-                [fe.build_feature_matrix(ohlcv[s], feature_names=_blend_cols, dropna=False)
-                 for s in _blend_syms],
-                axis=1, keys=_blend_syms,
-            )
-            for col in _blend_cols:
-                full_features_raw[col] = _per_sym.xs(col, level=1, axis=1).mean(axis=1)
+        # Non-equity assets (GLD, TLT, USO …) are excluded via hmm_cfg.blend_exclude.
+        full_features_raw = blend_cross_symbol_features(
+            full_features_raw,
+            {s: ohlcv[s] for s in syms if s in ohlcv},
+            feature_engineer=fe,
+            blend_exclude=hmm_cfg.get("blend_exclude", []),
+            min_bars=0,
+        )
 
         # ── Identify clean rows (all features non-NaN) ────────────────────────
         clean_mask = full_features_raw.notna().all(axis=1)
@@ -943,18 +938,13 @@ class WalkForwardBacktester:
         # Blend log_ret_1 and realized_vol_20 across all symbols so the HMM sees
         # a basket-level return/vol signal rather than a single proxy.
         # Non-equity assets excluded via hmm_cfg.blend_exclude (see run()).
-        _blend_exclude = set(hmm_cfg.get("blend_exclude", []))
-        _blend_syms = [s for s in syms if s not in _blend_exclude]
-        _blend_cols = [c for c in ["log_ret_1", "realized_vol_20"]
-                       if c in full_features_raw.columns]
-        if len(_blend_syms) > 1 and _blend_cols:
-            _per_sym = pd.concat(
-                [fe.build_feature_matrix(ohlcv[s], feature_names=_blend_cols, dropna=False)
-                 for s in _blend_syms],
-                axis=1, keys=_blend_syms,
-            )
-            for col in _blend_cols:
-                full_features_raw[col] = _per_sym.xs(col, level=1, axis=1).mean(axis=1)
+        full_features_raw = blend_cross_symbol_features(
+            full_features_raw,
+            {s: ohlcv[s] for s in syms if s in ohlcv},
+            feature_engineer=fe,
+            blend_exclude=hmm_cfg.get("blend_exclude", []),
+            min_bars=0,
+        )
 
         clean_mask     = full_features_raw.notna().all(axis=1)
         clean_features = full_features_raw[clean_mask]

@@ -52,6 +52,7 @@ _SETS_DIR          = _ROOT / "config" / "sets"
 _ACTIVE_SET_FILE   = _ROOT / "config" / "active_set"
 
 # ── HMM feature helper (defined in data/feature_engineering.py) ───────────────
+from data.feature_blending import blend_cross_symbol_features as _blend_cross_symbol_features
 from data.feature_engineering import hmm_feature_names as _hmm_feature_names
 
 
@@ -565,26 +566,19 @@ def _train_hmm(
 
     # Blend log_ret_1 and realized_vol_20 across equity-like basket symbols.
     # Non-equity symbols (e.g. GLD, TLT, USO) are excluded via hmm_cfg.blend_exclude.
-    _blend_exclude = set(hmm_cfg.get("blend_exclude", []))
-    _blend_syms = [s for s in symbols if s not in _blend_exclude]
-    _blend_cols = [c for c in ["log_ret_1", "realized_vol_20"]
-                   if c in features_clean.columns]
-    if len(_blend_syms) > 1 and _blend_cols:
-        _per_sym_dfs = []
-        _per_sym_keys = []
-        for _s in _blend_syms:
-            try:
-                _sb = sym_bars if _s == ref_symbol else _extract_sym(bars_df, _s)
-                _per_sym_dfs.append(
-                    fe.build_feature_matrix(_sb, feature_names=_blend_cols, dropna=False)
-                )
-                _per_sym_keys.append(_s)
-            except Exception:
-                pass
-        if len(_per_sym_keys) > 1:
-            _per_sym = pd.concat(_per_sym_dfs, axis=1, keys=_per_sym_keys)
-            for col in _blend_cols:
-                features_clean[col] = _per_sym.xs(col, level=1, axis=1).mean(axis=1)
+    _per_symbol_bars = {}
+    for _s in symbols:
+        try:
+            _per_symbol_bars[_s] = sym_bars if _s == ref_symbol else _extract_sym(bars_df, _s)
+        except Exception:
+            continue
+    features_clean = _blend_cross_symbol_features(
+        features_clean,
+        _per_symbol_bars,
+        feature_engineer=fe,
+        blend_exclude=hmm_cfg.get("blend_exclude", []),
+        min_bars=0,
+    )
 
     if len(features_clean) < hmm_cfg.get("min_train_bars", 252):
         raise RuntimeError(
@@ -980,26 +974,20 @@ class TradingSession:
                     _ref_df, feature_names=_hmm_feature_names(hmm_cfg)
                 )
                 # Blend log_ret_1 / realized_vol_20 across equity-like symbols
-                _sp_exclude = set(hmm_cfg.get("blend_exclude", []))
-                _blend_cols = [c for c in ["log_ret_1", "realized_vol_20"]
-                               if c in _feat_df.columns]
-                if len(symbols) > 1 and _blend_cols:
-                    _sp_dfs  = [_fe.build_feature_matrix(_ref_df, feature_names=_blend_cols, dropna=False)]
-                    _sp_keys = [_ref_sym]
-                    for _s in symbols:
-                        if _s == _ref_sym or _s in _sp_exclude:
-                            continue
-                        _sb = _pred_bars.get(_s)
-                        if _sb is not None and len(_sb) >= 10:
-                            try:
-                                _sp_dfs.append(_fe.build_feature_matrix(_sb, feature_names=_blend_cols, dropna=False))
-                                _sp_keys.append(_s)
-                            except Exception:
-                                pass
-                    if len(_sp_keys) > 1:
-                        _sp = pd.concat(_sp_dfs, axis=1, keys=_sp_keys)
-                        for _col in _blend_cols:
-                            _feat_df[_col] = _sp.xs(_col, level=1, axis=1).mean(axis=1)
+                _sp_bars = {_ref_sym: _ref_df}
+                for _s in symbols:
+                    if _s == _ref_sym:
+                        continue
+                    _sb = _pred_bars.get(_s)
+                    if _sb is not None:
+                        _sp_bars[_s] = _sb
+                _feat_df = _blend_cross_symbol_features(
+                    _feat_df,
+                    _sp_bars,
+                    feature_engineer=_fe,
+                    blend_exclude=hmm_cfg.get("blend_exclude", []),
+                    min_bars=10,
+                )
                 if len(_feat_df) < 10:
                     _startup_notes = [f"Startup predict: only {len(_feat_df)} clean feature rows (need 10)"]
                 else:
@@ -1166,26 +1154,20 @@ class TradingSession:
                     ref_bars, feature_names=_hmm_feature_names(hmm_cfg)
                 )
                 # Blend log_ret_1 / realized_vol_20 across equity-like symbols
-                _lp_exclude = set(hmm_cfg.get("blend_exclude", []))
-                _blend_cols = [c for c in ["log_ret_1", "realized_vol_20"]
-                               if c in features_clean.columns]
-                if len(symbols) > 1 and _blend_cols:
-                    _lp_dfs  = [fe.build_feature_matrix(ref_bars, feature_names=_blend_cols, dropna=False)]
-                    _lp_keys = [ref_sym]
-                    for _s in symbols:
-                        if _s == ref_sym or _s in _lp_exclude:
-                            continue
-                        _sb = bars_by_symbol.get(_s)
-                        if _sb is not None and len(_sb) >= 10:
-                            try:
-                                _lp_dfs.append(fe.build_feature_matrix(_sb, feature_names=_blend_cols, dropna=False))
-                                _lp_keys.append(_s)
-                            except Exception:
-                                pass
-                    if len(_lp_keys) > 1:
-                        _lp = pd.concat(_lp_dfs, axis=1, keys=_lp_keys)
-                        for _col in _blend_cols:
-                            features_clean[_col] = _lp.xs(_col, level=1, axis=1).mean(axis=1)
+                _lp_bars = {ref_sym: ref_bars}
+                for _s in symbols:
+                    if _s == ref_sym:
+                        continue
+                    _sb = bars_by_symbol.get(_s)
+                    if _sb is not None:
+                        _lp_bars[_s] = _sb
+                features_clean = _blend_cross_symbol_features(
+                    features_clean,
+                    _lp_bars,
+                    feature_engineer=fe,
+                    blend_exclude=hmm_cfg.get("blend_exclude", []),
+                    min_bars=10,
+                )
                 if len(features_clean) < 10:
                     logger.warning("Too few clean feature rows -- skipping bar")
                     continue
