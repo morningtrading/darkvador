@@ -58,6 +58,7 @@ print_menu() {
     echo -e "  ${GREEN}[5]${RESET}  Backtest Group   ${DIM}(active group, 2020-now, benchmark)${RESET}"
     echo -e "  ${GREEN}[6]${RESET}  Forward Test     ${DIM}(hold-out 2024-today, out-of-sample)${RESET}"
     echo ""
+    echo -e "  ${GREEN}[7]${RESET}  Stress Test      ${DIM}(crash / gap / vol-spike scenarios, active group)${RESET}"
     echo -e "  ${GREEN}[8]${RESET}  Train + Backtest ${DIM}(retrain HMM then full benchmark, active group)${RESET}"
     echo ""
     echo -e "  ${YELLOW}── Analysis ────────────────────────────────${RESET}"
@@ -241,6 +242,11 @@ while true; do
             run_command \
                 "Forward Test — group: $ASSET_GROUP  2024-today (hold-out)" \
                 "py -3.12 main.py backtest --asset-group $ASSET_GROUP --start 2024-01-01 --compare"
+            ;;
+        7)
+            run_command \
+                "Stress Test — group: $ASSET_GROUP  2020-now" \
+                "PYTHONIOENCODING=utf-8 py -3.12 main.py stress --asset-group $ASSET_GROUP --start 2020-01-01"
             ;;
         8)
             run_command \

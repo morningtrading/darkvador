@@ -2721,12 +2721,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     # ── stress ────────────────────────────────────────────────────────────────
     stress_p = sub.add_parser("stress", help="Run stress-test scenario suite")
-    stress_p.add_argument("--config",  default="config/settings.yaml")
-    stress_p.add_argument("--output",  default="results/")
-    stress_p.add_argument("--symbols", default=None)
-    stress_p.add_argument("--start",   default=None)
-    stress_p.add_argument("--end",     default=None)
-    stress_p.add_argument("--set",     default=None, dest="config_set",
+    stress_p.add_argument("--config",      default="config/settings.yaml")
+    stress_p.add_argument("--output",      default="results/")
+    stress_p.add_argument("--asset-group", default=None, dest="asset_group",
+                           help="Asset group from config (stocks | crypto | indices | midcap)")
+    stress_p.add_argument("--symbols",     default=None,
+                           help="Comma-separated symbols — overrides asset-group")
+    stress_p.add_argument("--start",       default=None)
+    stress_p.add_argument("--end",         default=None)
+    stress_p.add_argument("--set",         default=None, dest="config_set",
                            help="Config set to apply")
 
     # ── full-cycle ────────────────────────────────────────────────────────────
