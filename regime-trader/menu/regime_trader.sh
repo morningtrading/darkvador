@@ -68,7 +68,7 @@ print_menu() {
     echo -e "  ${MAGENTA}[c]${RESET}  Config Set       ${DIM}(conservative | balanced | aggressive)${RESET}"
     echo ""
     echo -e "  ${YELLOW}── Asset Groups ────────────────────────────${RESET}"
-    echo -e "  ${BLUE}[g]${RESET}  Change Group     ${DIM}(stocks | crypto | indices)${RESET}"
+    echo -e "  ${BLUE}[g]${RESET}  Change Group     ${DIM}(stocks | crypto | indices | midcap)${RESET}"
     echo ""
     echo -e "  ${YELLOW}── Source Control ──────────────────────────${RESET}"
     echo -e "  ${MAGENTA}[s]${RESET}  Save & Push      ${DIM}(git commit all changes + push to GitHub)${RESET}"
@@ -169,13 +169,15 @@ select_group() {
     echo -e "  ${YELLOW}Select asset group:${RESET}"
     echo -e "  ${BLUE}[1]${RESET}  stocks   ${DIM}(SPY QQQ AAPL MSFT AMZN GOOGL NVDA META TSLA AMD)${RESET}"
     echo -e "  ${BLUE}[2]${RESET}  crypto   ${DIM}(BTC ETH SOL AVAX DOGE LTC LINK UNI)${RESET}"
-    echo -e "  ${BLUE}[3]${RESET}  indices  ${DIM}(SPY QQQ DIA IWM GLD TLT EFA EEM VNQ USO)${RESET}"
+    echo -e "  ${BLUE}[3]${RESET}  indices  ${DIM}(SPY QQQ DIA IWM GLD EFA EEM VNQ EWG)${RESET}"
+    echo -e "  ${BLUE}[4]${RESET}  midcap   ${DIM}(AXON CRDO FIX POWL KTOS CACI AEIS ONTO FTAI IBP)${RESET}"
     echo ""
     read -rp "  Your choice: " gchoice
     case "$gchoice" in
         1) ASSET_GROUP="stocks"  ;;
         2) ASSET_GROUP="crypto"  ;;
         3) ASSET_GROUP="indices" ;;
+        4) ASSET_GROUP="midcap"  ;;
         *) echo -e "  ${RED}Invalid — keeping '$ASSET_GROUP'${RESET}" ; sleep 1 ;;
     esac
 }
