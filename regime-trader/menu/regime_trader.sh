@@ -19,8 +19,19 @@ RED='\033[1;31m'
 DIM='\033[2m'
 RESET='\033[0m'
 
-# ── active asset group (default: stocks) ─────────────────────
-ASSET_GROUP="stocks"
+# ── active asset group (loaded from registry) ────────────────
+# Registry: config/asset_groups.yaml (managed via `py -3.12 main.py groups`)
+AVAILABLE_GROUPS=()
+load_groups() {
+    # mapfile from Python, fall back to "stocks" if Python fails
+    mapfile -t AVAILABLE_GROUPS < <(py -3.12 main.py groups list --names-only 2>/dev/null)
+    if [ ${#AVAILABLE_GROUPS[@]} -eq 0 ]; then
+        AVAILABLE_GROUPS=("stocks")
+    fi
+}
+load_groups
+DEFAULT_GROUP="$(py -3.12 main.py groups default 2>/dev/null | head -n1)"
+ASSET_GROUP="${DEFAULT_GROUP:-${AVAILABLE_GROUPS[0]}}"
 
 # ── active config set ─────────────────────────────────────────
 ACTIVE_SET_FILE="$ROOT/config/active_set"
@@ -69,7 +80,7 @@ print_menu() {
     echo -e "  ${MAGENTA}[c]${RESET}  Config Set       ${DIM}(conservative | balanced | aggressive)${RESET}"
     echo ""
     echo -e "  ${YELLOW}── Asset Groups ────────────────────────────${RESET}"
-    echo -e "  ${BLUE}[g]${RESET}  Change Group     ${DIM}(stocks | crypto | indices | midcap)${RESET}"
+    echo -e "  ${BLUE}[g]${RESET}  Change Group     ${DIM}(dynamic list from config/asset_groups.yaml)${RESET}"
     echo ""
     echo -e "  ${YELLOW}── Source Control ──────────────────────────${RESET}"
     echo -e "  ${MAGENTA}[s]${RESET}  Save & Push      ${DIM}(git commit all changes + push to GitHub)${RESET}"
@@ -166,21 +177,29 @@ select_set() {
 }
 
 select_group() {
+    load_groups
     echo ""
     echo -e "  ${YELLOW}Select asset group:${RESET}"
-    echo -e "  ${BLUE}[1]${RESET}  stocks   ${DIM}(SPY QQQ AAPL MSFT AMZN GOOGL NVDA META TSLA AMD)${RESET}"
-    echo -e "  ${BLUE}[2]${RESET}  crypto   ${DIM}(BTC ETH SOL AVAX DOGE LTC LINK UNI)${RESET}"
-    echo -e "  ${BLUE}[3]${RESET}  indices  ${DIM}(SPY QQQ DIA IWM GLD EFA EEM VNQ EWG)${RESET}"
-    echo -e "  ${BLUE}[4]${RESET}  midcap   ${DIM}(AXON CRDO FIX POWL KTOS CACI AEIS ONTO FTAI IBP)${RESET}"
+    local i=1
+    for name in "${AVAILABLE_GROUPS[@]}"; do
+        local syms
+        syms="$(py -3.12 main.py groups show "$name" --json 2>/dev/null \
+                 | py -3.12 -c "import sys,json; d=json.load(sys.stdin); g=list(d.values())[0]; print(' '.join(g['symbols'][:8]) + (' ...' if len(g['symbols'])>8 else ''))" 2>/dev/null)"
+        [ -z "$syms" ] && syms=""
+        echo -e "  ${BLUE}[$i]${RESET}  ${name}   ${DIM}(${syms})${RESET}"
+        i=$((i+1))
+    done
+    echo -e "  ${DIM}(tip: add a group with: py -3.12 main.py groups add <name> --symbols A,B,C)${RESET}"
     echo ""
     read -rp "  Your choice: " gchoice
-    case "$gchoice" in
-        1) ASSET_GROUP="stocks"  ;;
-        2) ASSET_GROUP="crypto"  ;;
-        3) ASSET_GROUP="indices" ;;
-        4) ASSET_GROUP="midcap"  ;;
-        *) echo -e "  ${RED}Invalid — keeping '$ASSET_GROUP'${RESET}" ; sleep 1 ;;
-    esac
+    if [[ "$gchoice" =~ ^[0-9]+$ ]]; then
+        local idx=$((gchoice - 1))
+        if [ "$idx" -ge 0 ] && [ "$idx" -lt "${#AVAILABLE_GROUPS[@]}" ]; then
+            ASSET_GROUP="${AVAILABLE_GROUPS[$idx]}"
+            return
+        fi
+    fi
+    echo -e "  ${RED}Invalid — keeping '$ASSET_GROUP'${RESET}" ; sleep 1
 }
 
 run_command() {
