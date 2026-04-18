@@ -22,12 +22,27 @@ RESET='\033[0m'
 # ── active asset group (loaded from registry) ────────────────
 # Registry: config/asset_groups.yaml (managed via `py -3.12 main.py groups`)
 AVAILABLE_GROUPS=()
+declare -A GROUP_PREVIEW   # name -> "SYM1 SYM2 ... (N symbols)"
 load_groups() {
-    # mapfile from Python, fall back to "stocks" if Python fails
     mapfile -t AVAILABLE_GROUPS < <(py -3.12 main.py groups list --names-only 2>/dev/null)
     if [ ${#AVAILABLE_GROUPS[@]} -eq 0 ]; then
         AVAILABLE_GROUPS=("stocks")
     fi
+    # Build preview map in one shot (one python call, not one per group)
+    GROUP_PREVIEW=()
+    while IFS=$'\t' read -r _gname _gprev; do
+        [ -n "$_gname" ] && GROUP_PREVIEW["$_gname"]="$_gprev"
+    done < <(py -3.12 main.py groups list --json 2>/dev/null | py -3.12 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    for name, g in d.get('groups', {}).items():
+        s = g.get('symbols', [])
+        preview = ' '.join(s[:6]) + (' ...' if len(s) > 6 else '')
+        print(f'{name}\t{preview} ({len(s)} symbols)')
+except Exception:
+    pass
+")
 }
 load_groups
 DEFAULT_GROUP="$(py -3.12 main.py groups default 2>/dev/null | head -n1)"
@@ -85,9 +100,118 @@ print_menu() {
     echo -e "  ${YELLOW}── Source Control ──────────────────────────${RESET}"
     echo -e "  ${MAGENTA}[s]${RESET}  Save & Push      ${DIM}(git commit all changes + push to GitHub)${RESET}"
     echo ""
+    echo -e "  ${YELLOW}── Help ────────────────────────────────────${RESET}"
+    echo -e "  ${CYAN}[h]${RESET}  Detailed Help    ${DIM}(all commands + live config values)${RESET}"
+    echo ""
     echo -e "  ${RED}[q]${RESET}  Quit"
     echo ""
     echo -e "  ${DIM}─────────────────────────────────────────${RESET}"
+}
+
+show_help() {
+    # Dynamically builds a help page from:
+    #   - config/asset_groups.yaml  (via `main.py groups list --json`)
+    #   - config/settings.yaml      (all sections + key params)
+    #   - argparse `--help`         (flags per subcommand)
+    local active_set
+    active_set="$(get_active_set)"
+    clear
+    echo -e "${CYAN}"
+    echo "  ╔══════════════════════════════════════════════════════════════╗"
+    echo "  ║              REGIME TRADER — DETAILED HELP                   ║"
+    echo "  ╚══════════════════════════════════════════════════════════════╝"
+    echo -e "${RESET}"
+    echo -e "  ${DIM}Config set: ${MAGENTA}${active_set}${RESET}${DIM}   │   Active group: ${CYAN}${ASSET_GROUP}${RESET}"
+    echo ""
+
+    # ── Menu commands ─────────────────────────────────────────────
+    echo -e "${YELLOW}══ MENU COMMANDS ═══════════════════════════════════════════════${RESET}"
+    echo ""
+    local groups_csv paper_flag rebal_iv
+    groups_csv="$(py -3.12 main.py groups list --names-only 2>/dev/null | paste -sd, - | sed 's/,/, /g')"
+    paper_flag="$(py -3.12 -c "import yaml; print(yaml.safe_load(open('config/settings.yaml'))['broker']['paper_trading'])" 2>/dev/null)"
+    rebal_iv="$(py -3.12 -c "import yaml; print(yaml.safe_load(open('config/settings.yaml'))['backtest']['min_rebalance_interval'])" 2>/dev/null)"
+
+    echo -e "  ${GREEN}[0]${RESET} Full Cycle      → py -3.12 main.py full-cycle --start 2020-01-01"
+    echo -e "       Trains HMM and backtests ${CYAN}every${RESET} registered asset group,"
+    echo -e "       then prints a consolidated summary table."
+    echo -e "       Iterates: ${groups_csv}"
+    echo ""
+    echo -e "  ${GREEN}[1]${RESET} Train HMM       → py -3.12 main.py trade --train-only --asset-group ${ASSET_GROUP}"
+    echo -e "       Fetches latest bars, fits the HMM, saves to models/hmm.pkl, exits."
+    echo ""
+    echo -e "  ${GREEN}[2]${RESET} Dry Run         → py -3.12 main.py trade --dry-run --asset-group ${ASSET_GROUP}"
+    echo -e "       Full live pipeline (signals, sizing, risk) but places ${RED}no orders${RESET}."
+    echo ""
+    echo -e "  ${GREEN}[3]${RESET} Live / Paper    → py -3.12 main.py trade --asset-group ${ASSET_GROUP}"
+    echo -e "       Real trading loop. broker.paper_trading = ${paper_flag}."
+    echo ""
+    echo -e "  ${GREEN}[4]${RESET} Backtest Quick  → py -3.12 main.py backtest --asset-group ${ASSET_GROUP} --start 2020-01-01"
+    echo -e "       Walk-forward backtest, no benchmark (faster)."
+    echo ""
+    echo -e "  ${GREEN}[5]${RESET} Backtest Group  → py -3.12 main.py backtest --asset-group ${ASSET_GROUP} --start 2020-01-01 --compare"
+    echo -e "       Walk-forward backtest + benchmark comparison table."
+    echo ""
+    echo -e "  ${GREEN}[6]${RESET} Forward Test    → py -3.12 main.py backtest --asset-group ${ASSET_GROUP} --start 2024-01-01 --compare"
+    echo -e "       Hold-out out-of-sample test from 2024."
+    echo ""
+    echo -e "  ${GREEN}[7]${RESET} Stress Test     → py -3.12 main.py stress --asset-group ${ASSET_GROUP} --start 2020-01-01"
+    echo -e "       Crash / gap / vol-spike scenario suite."
+    echo ""
+    echo -e "  ${GREEN}[8]${RESET} Train+Backtest  → retrains HMM then runs Backtest (with benchmark)."
+    echo ""
+    echo -e "  ${GREEN}[p]${RESET} Interval Sweep  → py -3.12 main.py sweep --asset-group ${ASSET_GROUP} --start 2020-01-01"
+    echo -e "       Finds best min_rebalance_interval (currently: ${rebal_iv})."
+    echo ""
+    echo -e "  ${GREEN}[r]${RESET} Conf×Stab Sweep → py -3.12 main.py cs-sweep --asset-group ${ASSET_GROUP} --start 2020-01-01"
+    echo -e "       2-D grid: min_confidence × stability_bars."
+    echo ""
+    echo -e "  ${MAGENTA}[c]${RESET} Config Set      → switches preset (conservative | balanced | aggressive)."
+    echo -e "  ${BLUE}[g]${RESET} Change Group    → picks active asset group (dynamic list)."
+    echo -e "  ${MAGENTA}[s]${RESET} Save & Push     → git add -A, commit, push to origin/main."
+    echo ""
+
+    # ── Asset groups (live) ──────────────────────────────────────
+    echo -e "${YELLOW}══ ASSET GROUPS (config/asset_groups.yaml) ═════════════════════${RESET}"
+    py -3.12 main.py groups list 2>/dev/null | sed 's/^/  /'
+    echo ""
+    echo -e "  ${DIM}Manage: py -3.12 main.py groups <list|show|add|remove|edit|rename|set-default|validate|export|import>${RESET}"
+    echo ""
+
+    # ── Parameters (live, from settings.yaml) ────────────────────
+    echo -e "${YELLOW}══ PARAMETERS (config/settings.yaml, set: ${MAGENTA}${active_set}${YELLOW}) ═══════════════${RESET}"
+    py -3.12 -c "
+import yaml
+cfg = yaml.safe_load(open('config/settings.yaml'))
+for section, body in cfg.items():
+    if not isinstance(body, dict):
+        print(f'  {section}: {body}')
+        continue
+    print(f'  [{section}]')
+    for k, v in body.items():
+        if isinstance(v, list) and len(v) > 6:
+            shown = ', '.join(str(x) for x in v[:6]) + f' ... ({len(v)} items)'
+        elif isinstance(v, list):
+            shown = ', '.join(str(x) for x in v)
+        else:
+            shown = v
+        print(f'    {k:<30} = {shown}')
+    print()
+" 2>/dev/null
+
+    # ── CLI flags per subcommand (live, from argparse) ───────────
+    echo -e "${YELLOW}══ CLI FLAGS PER SUBCOMMAND (py -3.12 main.py <cmd> --help) ════${RESET}"
+    echo ""
+    for cmd in trade backtest stress full-cycle sweep cs-sweep groups; do
+        echo -e "  ${GREEN}▸ ${cmd}${RESET}"
+        py -3.12 main.py "$cmd" --help 2>/dev/null \
+            | awk '/^  -/{print "    " $0}' \
+            | sed 's/^    --/    --/'
+        echo ""
+    done
+
+    echo -e "  ${DIM}─────────────────────────────────────────${RESET}"
+    read -rp "  Press Enter to return to menu..."
 }
 
 git_save() {
@@ -180,22 +304,21 @@ select_group() {
     load_groups
     echo ""
     echo -e "  ${YELLOW}Select asset group:${RESET}"
-    local i=1
-    for name in "${AVAILABLE_GROUPS[@]}"; do
-        local syms
-        syms="$(py -3.12 main.py groups show "$name" --json 2>/dev/null \
-                 | py -3.12 -c "import sys,json; d=json.load(sys.stdin); g=list(d.values())[0]; print(' '.join(g['symbols'][:8]) + (' ...' if len(g['symbols'])>8 else ''))" 2>/dev/null)"
-        [ -z "$syms" ] && syms=""
-        echo -e "  ${BLUE}[$i]${RESET}  ${name}   ${DIM}(${syms})${RESET}"
-        i=$((i+1))
+
+    local idx name num preview
+    for idx in "${!AVAILABLE_GROUPS[@]}"; do
+        name="${AVAILABLE_GROUPS[$idx]}"
+        num=$((idx + 1))
+        preview="${GROUP_PREVIEW[$name]:-}"
+        echo -e "  ${BLUE}[${num}]${RESET}  ${name}   ${DIM}${preview}${RESET}"
     done
     echo -e "  ${DIM}(tip: add a group with: py -3.12 main.py groups add <name> --symbols A,B,C)${RESET}"
     echo ""
     read -rp "  Your choice: " gchoice
     if [[ "$gchoice" =~ ^[0-9]+$ ]]; then
-        local idx=$((gchoice - 1))
-        if [ "$idx" -ge 0 ] && [ "$idx" -lt "${#AVAILABLE_GROUPS[@]}" ]; then
-            ASSET_GROUP="${AVAILABLE_GROUPS[$idx]}"
+        local choose_idx=$((gchoice - 1))
+        if [ "$choose_idx" -ge 0 ] && [ "$choose_idx" -lt "${#AVAILABLE_GROUPS[@]}" ]; then
+            ASSET_GROUP="${AVAILABLE_GROUPS[$choose_idx]}"
             return
         fi
     fi
@@ -292,6 +415,9 @@ while true; do
             ;;
         g|G)
             select_group
+            ;;
+        h|H)
+            show_help
             ;;
         q|Q)
             echo ""
