@@ -155,9 +155,30 @@ def load_credentials(credentials_path: str = "config/credentials.yaml") -> Optio
 
 # ── Data fetching ──────────────────────────────────────────────────────────────
 
+# Major fiat currencies — used to detect forex pairs (X/Y where both sides are
+# fiat). Alpaca does NOT support forex; we flag these up-front so the user gets
+# a clear error instead of a KeyError('close') deep in the fetch pipeline.
+_FIAT_CURRENCIES = {
+    "USD", "EUR", "GBP", "JPY", "CAD", "AUD", "CHF", "NZD",
+    "CNY", "HKD", "SEK", "NOK", "DKK", "SGD", "MXN", "ZAR",
+}
+
+
+def _is_forex_like(symbol: str) -> bool:
+    """Return True for X/Y symbols where both sides are fiat currencies
+    (EUR/USD, GBP/JPY, USD/CAD …). Alpaca does not serve these."""
+    if "/" not in symbol:
+        return False
+    base, _, quote = symbol.partition("/")
+    return base.upper() in _FIAT_CURRENCIES and quote.upper() in _FIAT_CURRENCIES
+
+
 def _is_crypto(symbol: str) -> bool:
-    """Return True if the symbol looks like a crypto pair (e.g. BTC/USD)."""
-    return "/" in symbol
+    """Return True if the symbol is an Alpaca-supported crypto pair (BASE/QUOTE,
+    not both-fiat). Excludes forex pairs like EUR/USD."""
+    if "/" not in symbol:
+        return False
+    return not _is_forex_like(symbol)
 
 
 def _fetch_prices(
@@ -177,8 +198,17 @@ def _fetch_prices(
     """
     from alpaca.data.timeframe import TimeFrame
 
+    # Up-front validation: flag symbols Alpaca can't serve (forex, options, futures).
+    forex_syms = [s for s in symbols if _is_forex_like(s)]
+    if forex_syms:
+        raise ValueError(
+            f"Alpaca does not support forex symbols: {forex_syms}. "
+            f"Use an equity/ETF proxy (e.g. FXE for EUR, FXY for JPY, UUP for USD index) "
+            f"or plug in an alternative data source."
+        )
+
     crypto_syms = [s for s in symbols if _is_crypto(s)]
-    stock_syms  = [s for s in symbols if not _is_crypto(s)]
+    stock_syms  = [s for s in symbols if not _is_crypto(s) and not _is_forex_like(s)]
     frames: List[pd.DataFrame] = []
 
     # ── Equity bars ──────────────────────────────────────────────────────────
@@ -195,6 +225,12 @@ def _fetch_prices(
             adjustment=Adjustment.ALL,
         )
         df = sc.get_stock_bars(req).df
+        if df.empty or "close" not in df.columns:
+            raise ValueError(
+                f"Alpaca returned no stock bars for {stock_syms} "
+                f"(range {start} → {end}). Check the symbols and your Alpaca "
+                f"subscription tier (data_feed={os.getenv('ALPACA_DATA_FEED', 'iex')})."
+            )
         close = df["close"].unstack(level="symbol")
         close.index = pd.to_datetime(close.index).normalize().tz_localize(None)
         close.index.name = "date"
@@ -213,6 +249,12 @@ def _fetch_prices(
             end=end,
         )
         df = cc.get_crypto_bars(req).df
+        if df.empty or "close" not in df.columns:
+            raise ValueError(
+                f"Alpaca returned no crypto bars for {crypto_syms} "
+                f"(range {start} → {end}). Verify symbols — typical format "
+                f"is BTC/USD, ETH/USD, SOL/USD, etc."
+            )
         close = df["close"].unstack(level="symbol")
         close.index = pd.to_datetime(close.index).normalize().tz_localize(None)
         close.index.name = "date"

@@ -21,8 +21,3 @@ groups:
     asset_class: equity
     tags: [midcap, growth, us]
     symbols: [AXON, CRDO, FIX, POWL, KTOS, CACI, AEIS, ONTO, FTAI, IBP]
-  forex:
-    description: Major FX pairs
-    asset_class: forex
-    tags: [fx, 24x5]
-    symbols: [EUR/USD, GBP/USD, USD/JPY]
