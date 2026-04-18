@@ -29,6 +29,17 @@ asset_groups:
   - EEM
   - VNQ
   - EWG
+  midcap:
+  - AXON
+  - CRDO
+  - FIX
+  - POWL
+  - KTOS
+  - CACI
+  - AEIS
+  - ONTO
+  - FTAI
+  - IBP
 broker:
   paper_trading: true
   asset_group: stocks
