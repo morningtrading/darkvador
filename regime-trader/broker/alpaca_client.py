@@ -434,7 +434,8 @@ class AlpacaClient:
         """Return True if the US equities market is currently open."""
         try:
             return bool(self.get_clock().is_open)
-        except Exception:
+        except Exception as exc:
+            logger.warning("is_market_open() failed, assuming closed: %s", exc)
             return False
 
     # ======================================================================= #
@@ -451,7 +452,8 @@ class AlpacaClient:
         self._require_connection()
         try:
             return self._trading_client.get_open_position(symbol)
-        except Exception:
+        except Exception as exc:
+            logger.debug("get_position(%s) -> None (%s)", symbol, exc)
             return None
 
     def get_positions_as_dict(self) -> Dict[str, float]:
