@@ -26,3 +26,15 @@ groups:
     asset_class: forex_etf
     tags: [fx, etf]
     symbols: [UUP, UDN, FXE, FXB, FXY, FXF, FXC, FXA, CYB, CEW]
+  midcap_neutral:
+    description: S&P 400 constituents pre-2020, mature mid-caps across sectors, selected
+      without post-2020 hindsight
+    asset_class: equity
+    tags: [midcap, neutral, sp400-2019]
+    symbols: [PNFP, WST, CHE, RPM, RGA, CASY, GGG, HEI, LECO, WTS]
+  stocks_neutral:
+    description: Top 10 S&P 500 by market cap at 2019-12-31, no post-2020 hindsight
+      (excludes NVDA/TSLA/AMD)
+    asset_class: equity
+    tags: [core, neutral, sp500-top10-2019]
+    symbols: [AAPL, MSFT, GOOGL, AMZN, META, BRK.B, JPM, JNJ, V, PG]
