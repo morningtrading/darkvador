@@ -625,52 +625,37 @@ class PerformanceAnalyzer:
         self,
         prices: pd.Series,
         initial_capital: float = 100_000.0,
+        slippage_pct: float = 0.0,
     ) -> pd.Series:
         """
         Buy-and-hold equity curve from a single-symbol price series.
 
-        Parameters
-        ----------
-        prices :
-            Close prices indexed by date.
-        initial_capital :
-            Starting equity.
-
-        Returns
-        -------
-        Equity curve aligned to ``prices.index``.
+        A one-time entry slippage cost is applied (buy at t=0).
         """
         ratio = prices / prices.iloc[0]
-        return (ratio * initial_capital).rename("bnh_equity")
+        effective = initial_capital * (1.0 - slippage_pct)
+        return (ratio * effective).rename("bnh_equity")
 
     def compute_benchmark_sma(
         self,
         prices: pd.Series,
         sma_window: int = 200,
         initial_capital: float = 100_000.0,
+        slippage_pct: float = 0.0,
     ) -> pd.Series:
         """
         SMA trend-following equity: invested when close > SMA(sma_window).
 
-        Signals are 1-bar delayed (no look-ahead).
-
-        Parameters
-        ----------
-        prices :
-            Close prices.
-        sma_window :
-            Moving-average period.
-        initial_capital :
-            Starting equity.
-
-        Returns
-        -------
-        Equity curve.
+        Signals are 1-bar delayed (no look-ahead). ``slippage_pct`` is
+        charged whenever the position toggles (cost = |Δpos| × slippage_pct
+        subtracted from that bar's return).
         """
         sma = prices.rolling(sma_window).mean()
         invested = (prices > sma).astype(float).shift(1).fillna(0.0)
         daily_ret = prices.pct_change().fillna(0.0)
-        strat_ret = invested * daily_ret
+        turnover = invested.diff().abs().fillna(invested.iloc[0])
+        cost = turnover * slippage_pct
+        strat_ret = invested * daily_ret - cost
         equity = initial_capital * (1.0 + strat_ret).cumprod()
         return equity.rename("sma_equity")
 
@@ -680,6 +665,7 @@ class PerformanceAnalyzer:
         allocations: List[float],
         n_seeds: int = 100,
         initial_capital: float = 100_000.0,
+        slippage_pct: float = 0.0,
     ) -> Tuple[pd.Series, pd.Series]:
         """
         Monte Carlo benchmark: random allocation changes with the same
@@ -706,7 +692,10 @@ class PerformanceAnalyzer:
         for seed in range(n_seeds):
             rng = np.random.default_rng(seed)
             alloc = rng.choice(allocations, size=n)
-            path_ret = alloc * returns.values
+            # Cost when allocation changes
+            d_alloc = np.abs(np.diff(alloc, prepend=alloc[0]))
+            cost = d_alloc * slippage_pct
+            path_ret = alloc * returns.values - cost
             paths[seed] = initial_capital * np.cumprod(1.0 + path_ret)
 
         mean_curve = pd.Series(paths.mean(axis=0), index=returns.index,
@@ -721,6 +710,7 @@ class PerformanceAnalyzer:
         self,
         prices_df: pd.DataFrame,
         initial_capital: float = 100_000.0,
+        slippage_pct: float = 0.0,
     ) -> pd.Series:
         """
         Equal-weighted buy-and-hold equity curve across multiple symbols.
@@ -740,40 +730,30 @@ class PerformanceAnalyzer:
         Equity curve indexed like ``prices_df``.
         """
         normed = prices_df.div(prices_df.iloc[0])
-        return (normed.mean(axis=1) * initial_capital).rename("bnh_equity")
+        effective = initial_capital * (1.0 - slippage_pct)
+        return (normed.mean(axis=1) * effective).rename("bnh_equity")
 
     def compute_benchmark_sma_multi(
         self,
         prices_df: pd.DataFrame,
         sma_window: int = 200,
         initial_capital: float = 100_000.0,
+        slippage_pct: float = 0.0,
     ) -> pd.Series:
         """
         Equal-weighted SMA trend-following equity across multiple symbols.
 
         For each symbol the signal is: invested (weight = 1/N) when
         close > SMA(sma_window), else cash.  Signals are 1-bar delayed.
-
-        Parameters
-        ----------
-        prices_df :
-            DataFrame of close prices, one column per symbol.
-        sma_window :
-            Moving-average period.
-        initial_capital :
-            Starting equity.
-
-        Returns
-        -------
-        Equity curve.
+        ``slippage_pct`` is charged on each per-symbol toggle.
         """
         n_syms = prices_df.shape[1]
         daily_ret = prices_df.pct_change().fillna(0.0)
-        # Per-symbol in/out signal
         invested = (prices_df > prices_df.rolling(sma_window).mean()) \
                        .astype(float).shift(1).fillna(0.0)
-        # Equal-weight: each symbol contributes at most 1/N of the portfolio
-        port_ret = (invested * daily_ret).sum(axis=1) / n_syms
+        turnover = invested.diff().abs().fillna(invested.iloc[0])
+        cost = (turnover * slippage_pct).sum(axis=1) / n_syms
+        port_ret = (invested * daily_ret).sum(axis=1) / n_syms - cost
         equity = initial_capital * (1.0 + port_ret).cumprod()
         return equity.rename("sma_equity")
 
@@ -783,32 +763,20 @@ class PerformanceAnalyzer:
         fast: int = 9,
         slow: int = 45,
         initial_capital: float = 100_000.0,
+        slippage_pct: float = 0.0,
     ) -> pd.Series:
         """
         EMA crossover equity: long when fast EMA > slow EMA, else cash.
 
-        Signals are 1-bar delayed (no look-ahead).
-
-        Parameters
-        ----------
-        prices :
-            Close prices.
-        fast :
-            Fast EMA period (default 9).
-        slow :
-            Slow EMA period (default 45).
-        initial_capital :
-            Starting equity.
-
-        Returns
-        -------
-        Equity curve.
+        Signals are 1-bar delayed. ``slippage_pct`` charged on toggles.
         """
         ema_fast = prices.ewm(span=fast, adjust=False).mean()
         ema_slow = prices.ewm(span=slow, adjust=False).mean()
         invested  = (ema_fast > ema_slow).astype(float).shift(1).fillna(0.0)
         daily_ret = prices.pct_change().fillna(0.0)
-        strat_ret = invested * daily_ret
+        turnover  = invested.diff().abs().fillna(invested.iloc[0])
+        cost      = turnover * slippage_pct
+        strat_ret = invested * daily_ret - cost
         equity    = initial_capital * (1.0 + strat_ret).cumprod()
         return equity.rename("ema_cross_equity")
 
@@ -818,6 +786,7 @@ class PerformanceAnalyzer:
         fast: int = 9,
         slow: int = 45,
         initial_capital: float = 100_000.0,
+        slippage_pct: float = 0.0,
     ) -> pd.Series:
         """
         Equal-weighted EMA crossover equity across multiple symbols.
@@ -845,7 +814,9 @@ class PerformanceAnalyzer:
         ema_fast  = prices_df.ewm(span=fast,  adjust=False).mean()
         ema_slow  = prices_df.ewm(span=slow,  adjust=False).mean()
         invested  = (ema_fast > ema_slow).astype(float).shift(1).fillna(0.0)
-        port_ret  = (invested * daily_ret).sum(axis=1) / n_syms
+        turnover  = invested.diff().abs().fillna(invested.iloc[0])
+        cost      = (turnover * slippage_pct).sum(axis=1) / n_syms
+        port_ret  = (invested * daily_ret).sum(axis=1) / n_syms - cost
         equity    = initial_capital * (1.0 + port_ret).cumprod()
         return equity.rename("ema_cross_equity")
 
@@ -855,6 +826,7 @@ class PerformanceAnalyzer:
         allocations: List[float],
         n_seeds: int = 100,
         initial_capital: float = 100_000.0,
+        slippage_pct: float = 0.0,
     ) -> Tuple[pd.Series, pd.Series]:
         """
         Monte Carlo random-allocation benchmark on an equal-weighted universe.
@@ -881,6 +853,7 @@ class PerformanceAnalyzer:
         return self.compute_random_allocation_benchmark(
             ew_returns, allocations=allocations,
             n_seeds=n_seeds, initial_capital=initial_capital,
+            slippage_pct=slippage_pct,
         )
 
     # ── Private helpers ────────────────────────────────────────────────────────

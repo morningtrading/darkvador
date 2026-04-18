@@ -41,14 +41,18 @@ class AssetGroup:
     description: str = ""
     asset_class: str = ""
     tags: Tuple[str, ...] = field(default_factory=tuple)
+    warning: str = ""   # non-empty => loudly surfaced on backtest/trade commands
 
     def to_dict(self) -> Dict:
-        return {
+        out = {
             "description": self.description,
             "asset_class": self.asset_class,
             "tags": list(self.tags),
             "symbols": list(self.symbols),
         }
+        if self.warning:
+            out["warning"] = self.warning
+        return out
 
     @classmethod
     def from_dict(cls, name: str, data: Mapping) -> "AssetGroup":
@@ -62,6 +66,7 @@ class AssetGroup:
             description=str(data.get("description", "") or ""),
             asset_class=str(data.get("asset_class", "") or ""),
             tags=tuple(str(t) for t in tags),
+            warning=str(data.get("warning", "") or ""),
         )
 
 

@@ -6,11 +6,19 @@ groups:
     asset_class: equity
     tags: [core, liquid, us]
     symbols: [SPY, QQQ, AAPL, MSFT, AMZN, GOOGL, NVDA, META, TSLA, AMD]
+    warning: >-
+      SELECTION BIAS: NVDA/TSLA/AMD chosen with post-2020 hindsight. HMM
+      vs SMA-200 fair comparison on indices shows no alpha. Use for research
+      only — do not trade live without a fresh neutral selection.
   crypto:
     description: Top crypto pairs (Alpaca spot)
     asset_class: crypto
     tags: [crypto, 24x7]
     symbols: [BTC/USD, ETH/USD, SOL/USD, AVAX/USD, DOGE/USD, LTC/USD, LINK/USD, UNI/USD]
+    warning: >-
+      NOT YET VALIDATED under the same selection-bias / fair-slippage
+      framework as indices. Symbols chosen by recent market cap may carry
+      hindsight. Run a neutral pre-2020 basket check before live trading.
   indices:
     description: Broad-market & sector ETFs
     asset_class: etf
@@ -21,20 +29,35 @@ groups:
     asset_class: equity
     tags: [midcap, growth, us]
     symbols: [AXON, CRDO, FIX, POWL, KTOS, CACI, AEIS, ONTO, FTAI, IBP]
+    warning: >-
+      SEVERE SELECTION BIAS: All 10 symbols picked retrospectively as
+      2020-2026 winners. Midcap_neutral (S&P 400 pre-2020) gives +34%/Sharpe
+      0.27 vs this basket's +411%/1.40 — the entire edge is hindsight.
+      DO NOT TRADE LIVE. Research only.
   forex_etf:
     description: Forex exposure via NYSE-listed ETFs (tradable through Alpaca)
     asset_class: forex_etf
     tags: [fx, etf]
     symbols: [UUP, UDN, FXE, FXB, FXY, FXF, FXC, FXA, CYB, CEW]
+    warning: >-
+      Forex ETFs have wider spreads and lower liquidity than index ETFs.
+      Default slippage (5 bps) likely underestimates real cost — raise to
+      ~10-15 bps before drawing conclusions from backtests.
   midcap_neutral:
     description: S&P 400 constituents pre-2020, mature mid-caps across sectors, selected
       without post-2020 hindsight
     asset_class: equity
     tags: [midcap, neutral, sp400-2019]
     symbols: [PNFP, WST, CHE, RPM, RGA, CASY, GGG, HEI, LECO, WTS]
+    warning: >-
+      HMM underperforms buy-and-hold here (+34% vs +64%, Sharpe 0.27 vs
+      0.52). No alpha detected on neutral midcap basket. Research only.
   stocks_neutral:
     description: Top 10 S&P 500 by market cap at 2019-12-31, no post-2020 hindsight
       (excludes NVDA/TSLA/AMD)
     asset_class: equity
     tags: [core, neutral, sp500-top10-2019]
     symbols: [AAPL, MSFT, GOOGL, AMZN, META, BRK.B, JPM, JNJ, V, PG]
+    warning: >-
+      HMM underperforms buy-and-hold (+48% vs +64%, Sharpe 0.46 vs 0.53).
+      No alpha on neutral large-cap basket. Research only.

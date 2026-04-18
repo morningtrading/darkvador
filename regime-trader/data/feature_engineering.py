@@ -66,7 +66,16 @@ HMM_EXTENDED_FEATURES: List[str] = [
 
 
 def hmm_feature_names(hmm_cfg: dict) -> List[str]:
-    """Return the feature list to feed the HMM based on settings."""
+    """Return the feature list to feed the HMM based on settings.
+
+    Priority:
+      1. ``hmm.features_override`` (explicit list, wins if non-empty) —
+         used for ablation studies / custom feature sets.
+      2. ``hmm.extended_features`` boolean toggle (default True).
+    """
+    override = hmm_cfg.get("features_override")
+    if override:
+        return list(override)
     if hmm_cfg.get("extended_features", True):
         return HMM_EXTENDED_FEATURES
     return HMM_BASE_FEATURES

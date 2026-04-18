@@ -488,7 +488,12 @@ class WalkForwardBacktester:
         :class:`WindowResult`
         """
         # ── 1. Train HMM ──────────────────────────────────────────────────────
-        engine = HMMEngine(**{k: v for k, v in hmm_cfg.items()})
+        _engine_kwargs = {
+            "n_candidates", "n_init", "covariance_type", "min_train_bars",
+            "stability_bars", "flicker_window", "flicker_threshold",
+            "min_confidence", "min_covar",
+        }
+        engine = HMMEngine(**{k: v for k, v in hmm_cfg.items() if k in _engine_kwargs})
         engine.fit(is_features.values)
         logger.info("Fold %d: HMM fitted  n_states=%d  BIC=%.2f",
                     fold_id, engine._n_states, engine._training_bic)
@@ -978,7 +983,12 @@ class WalkForwardBacktester:
             if progress_callback:
                 progress_callback("training", n_folds, fold_id, n_cells)
 
-            engine = HMMEngine(**{k: v for k, v in hmm_cfg.items()})
+            _engine_kwargs = {
+                "n_candidates", "n_init", "covariance_type", "min_train_bars",
+                "stability_bars", "flicker_window", "flicker_threshold",
+                "min_confidence", "min_covar",
+            }
+            engine = HMMEngine(**{k: v for k, v in hmm_cfg.items() if k in _engine_kwargs})
             engine.fit(is_feat.values)
 
             # Run fold ONCE with base params to get equity carry-over

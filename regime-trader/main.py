@@ -276,6 +276,32 @@ def _fetch_prices(
 
 # ── Asset group resolver ──────────────────────────────────────────────────────
 
+_WARNED_GROUPS: set = set()
+
+
+def _emit_group_warning(group) -> None:
+    """Print a loud, eye-catching warning once per group per process run."""
+    warn_text = getattr(group, "warning", "") or ""
+    if not warn_text or group.name in _WARNED_GROUPS:
+        return
+    _WARNED_GROUPS.add(group.name)
+    bar = "!" * 76
+    try:
+        console = globals().get("console") or None
+        msg = (
+            f"\n[bold red]{bar}[/bold red]\n"
+            f"[bold red]!! WARNING — asset group '{group.name}':[/bold red]\n"
+            f"[yellow]{warn_text.strip()}[/yellow]\n"
+            f"[bold red]{bar}[/bold red]\n"
+        )
+        if console is not None:
+            console.print(msg)
+        else:
+            print(msg)
+    except Exception:
+        print(f"\n{bar}\n!! WARNING — asset group '{group.name}':\n{warn_text.strip()}\n{bar}\n")
+
+
 def _resolve_symbols(config: Dict, asset_group: Optional[str], symbols_arg: Optional[str]) -> List[str]:
     """
     Resolve the symbol list in priority order:
@@ -296,7 +322,9 @@ def _resolve_symbols(config: Dict, asset_group: Optional[str], symbols_arg: Opti
             from core.asset_groups import load_default_registry
             reg = load_default_registry(reload=True)
             if reg.has(group_name):
-                return list(reg.get(group_name).symbols)
+                grp = reg.get(group_name)
+                _emit_group_warning(grp)
+                return list(grp.symbols)
         except Exception as exc:
             logger.debug("AssetGroupRegistry unavailable (%s); trying legacy bloc", exc)
 
@@ -1749,13 +1777,18 @@ def run_backtest(config: Dict, args: argparse.Namespace) -> None:
 
     hmm_cfg_raw = config.get("hmm", {})
     hmm_config = {
-        "n_candidates":      hmm_cfg_raw.get("n_candidates", [3, 4, 5]),
-        "n_init":            hmm_cfg_raw.get("n_init", 10),
-        "min_train_bars":    hmm_cfg_raw.get("min_train_bars", 120),
-        "stability_bars":    hmm_cfg_raw.get("stability_bars", 3),
-        "flicker_window":    hmm_cfg_raw.get("flicker_window", 20),
-        "flicker_threshold": hmm_cfg_raw.get("flicker_threshold", 4),
-        "min_confidence":    hmm_cfg_raw.get("min_confidence", 0.55),
+        "n_candidates":       hmm_cfg_raw.get("n_candidates", [3, 4, 5]),
+        "n_init":             hmm_cfg_raw.get("n_init", 10),
+        "min_train_bars":     hmm_cfg_raw.get("min_train_bars", 120),
+        "stability_bars":     hmm_cfg_raw.get("stability_bars", 3),
+        "flicker_window":     hmm_cfg_raw.get("flicker_window", 20),
+        "flicker_threshold":  hmm_cfg_raw.get("flicker_threshold", 4),
+        "min_confidence":     hmm_cfg_raw.get("min_confidence", 0.55),
+        # Feature selection (was silently dropped before — the backtester
+        # was always using HMM_EXTENDED_FEATURES regardless of settings.yaml).
+        "extended_features":  hmm_cfg_raw.get("extended_features", True),
+        "features_override":  hmm_cfg_raw.get("features_override"),
+        "blend_exclude":      hmm_cfg_raw.get("blend_exclude", []),
     }
     strategy_config = {"strategy": config.get("strategy", {})}
     _strat = strategy_config["strategy"]
@@ -1941,6 +1974,10 @@ def run_backtest(config: Dict, args: argparse.Namespace) -> None:
     if getattr(args, "compare", False) and bm_prices is not None:
         _print("\nComputing benchmark strategies ...", console, style="dim")
 
+        # Same slippage applied to HMM strategy AND all benchmarks for
+        # apples-to-apples comparison.
+        _slip = float(config.get("backtest", {}).get("slippage_pct", 0.0005))
+
         multi = len(symbols) > 1
         if multi:
             # Build a price DataFrame aligned to the strategy equity index,
@@ -1949,24 +1986,24 @@ def run_backtest(config: Dict, args: argparse.Namespace) -> None:
             price_df = pd.DataFrame(
                 {s: prices[s] for s in avail_syms}
             ).reindex(result.combined_equity.index).ffill().dropna(how="all")
-            bnh_equity      = pa.compute_benchmark_bnh_multi(price_df, initial_capital)
-            sma_equity      = pa.compute_benchmark_sma_multi(price_df, 200, initial_capital)
-            ema_cross_equity = pa.compute_benchmark_ema_cross_multi(price_df, 9, 45, initial_capital)
+            bnh_equity      = pa.compute_benchmark_bnh_multi(price_df, initial_capital, slippage_pct=_slip)
+            sma_equity      = pa.compute_benchmark_sma_multi(price_df, 200, initial_capital, slippage_pct=_slip)
+            ema_cross_equity = pa.compute_benchmark_ema_cross_multi(price_df, 9, 45, initial_capital, slippage_pct=_slip)
             rand_mean, _ = pa.compute_random_allocation_benchmark_multi(
                 price_df, allocations=[0.60, 0.95], n_seeds=100,
-                initial_capital=initial_capital,
+                initial_capital=initial_capital, slippage_pct=_slip,
             )
         else:
-            bnh_equity       = pa.compute_benchmark_bnh(bm_prices, initial_capital)
-            sma_equity       = pa.compute_benchmark_sma(bm_prices, 200, initial_capital)
-            ema_cross_equity = pa.compute_benchmark_ema_cross(bm_prices, 9, 45, initial_capital)
+            bnh_equity       = pa.compute_benchmark_bnh(bm_prices, initial_capital, slippage_pct=_slip)
+            sma_equity       = pa.compute_benchmark_sma(bm_prices, 200, initial_capital, slippage_pct=_slip)
+            ema_cross_equity = pa.compute_benchmark_ema_cross(bm_prices, 9, 45, initial_capital, slippage_pct=_slip)
             underlying_ret     = bm_prices.pct_change().dropna()
             underlying_aligned = underlying_ret.reindex(
                 result.combined_returns.index
             ).dropna()
             rand_mean, _ = pa.compute_random_allocation_benchmark(
                 underlying_aligned, allocations=[0.60, 0.95], n_seeds=100,
-                initial_capital=initial_capital,
+                initial_capital=initial_capital, slippage_pct=_slip,
             )
 
         eq_idx       = result.combined_equity.index
@@ -2322,13 +2359,18 @@ def run_interval_sweep(config: Dict, args: argparse.Namespace) -> None:
     # ── Build configs (same for every sweep iteration) ────────────────────────
     hmm_cfg_raw = config.get("hmm", {})
     hmm_config = {
-        "n_candidates":      hmm_cfg_raw.get("n_candidates", [3, 4, 5]),
-        "n_init":            hmm_cfg_raw.get("n_init", 10),
-        "min_train_bars":    hmm_cfg_raw.get("min_train_bars", 120),
-        "stability_bars":    hmm_cfg_raw.get("stability_bars", 3),
-        "flicker_window":    hmm_cfg_raw.get("flicker_window", 20),
-        "flicker_threshold": hmm_cfg_raw.get("flicker_threshold", 4),
-        "min_confidence":    hmm_cfg_raw.get("min_confidence", 0.55),
+        "n_candidates":       hmm_cfg_raw.get("n_candidates", [3, 4, 5]),
+        "n_init":             hmm_cfg_raw.get("n_init", 10),
+        "min_train_bars":     hmm_cfg_raw.get("min_train_bars", 120),
+        "stability_bars":     hmm_cfg_raw.get("stability_bars", 3),
+        "flicker_window":     hmm_cfg_raw.get("flicker_window", 20),
+        "flicker_threshold":  hmm_cfg_raw.get("flicker_threshold", 4),
+        "min_confidence":     hmm_cfg_raw.get("min_confidence", 0.55),
+        # Feature selection (was silently dropped before — the backtester
+        # was always using HMM_EXTENDED_FEATURES regardless of settings.yaml).
+        "extended_features":  hmm_cfg_raw.get("extended_features", True),
+        "features_override":  hmm_cfg_raw.get("features_override"),
+        "blend_exclude":      hmm_cfg_raw.get("blend_exclude", []),
     }
     strategy_config = {"strategy": config.get("strategy", {})}
 
@@ -2558,13 +2600,18 @@ def run_cs_sweep(config: Dict, args: argparse.Namespace) -> None:
 
     hmm_cfg_raw = config.get("hmm", {})
     hmm_config = {
-        "n_candidates":      hmm_cfg_raw.get("n_candidates", [3, 4, 5]),
-        "n_init":            hmm_cfg_raw.get("n_init", 10),
-        "min_train_bars":    hmm_cfg_raw.get("min_train_bars", 120),
-        "stability_bars":    hmm_cfg_raw.get("stability_bars", 3),
-        "flicker_window":    hmm_cfg_raw.get("flicker_window", 20),
-        "flicker_threshold": hmm_cfg_raw.get("flicker_threshold", 4),
-        "min_confidence":    hmm_cfg_raw.get("min_confidence", 0.55),
+        "n_candidates":       hmm_cfg_raw.get("n_candidates", [3, 4, 5]),
+        "n_init":             hmm_cfg_raw.get("n_init", 10),
+        "min_train_bars":     hmm_cfg_raw.get("min_train_bars", 120),
+        "stability_bars":     hmm_cfg_raw.get("stability_bars", 3),
+        "flicker_window":     hmm_cfg_raw.get("flicker_window", 20),
+        "flicker_threshold":  hmm_cfg_raw.get("flicker_threshold", 4),
+        "min_confidence":     hmm_cfg_raw.get("min_confidence", 0.55),
+        # Feature selection (was silently dropped before — the backtester
+        # was always using HMM_EXTENDED_FEATURES regardless of settings.yaml).
+        "extended_features":  hmm_cfg_raw.get("extended_features", True),
+        "features_override":  hmm_cfg_raw.get("features_override"),
+        "blend_exclude":      hmm_cfg_raw.get("blend_exclude", []),
     }
     strategy_config = {"strategy": config.get("strategy", {})}
 
@@ -2776,8 +2823,9 @@ def run_groups(args: argparse.Namespace) -> int:
             default_name = reg.default()
             for g in groups:
                 marker = " [green]*[/green]" if g.name == default_name else ""
+                warn_flag = " [red]⚠[/red]" if getattr(g, "warning", "") else ""
                 t.add_row(
-                    g.name + marker,
+                    g.name + marker + warn_flag,
                     g.asset_class or "-",
                     ",".join(g.tags) or "-",
                     str(len(g.symbols)),
