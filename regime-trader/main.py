@@ -2130,11 +2130,16 @@ def run_train_only(config: Dict, args: Optional[argparse.Namespace] = None) -> N
 
 def run_full_cycle(config: Dict, args: argparse.Namespace) -> None:
     """
-    Execute HMM training and full backtest for all asset groups (stocks, crypto, indices)
-    and display a consolidated summary.
+    Execute HMM training and full backtest for every asset group defined in
+    config/asset_groups.yaml, then display a consolidated summary.
     """
     console = _console()
-    asset_groups = ["stocks", "crypto", "indices"]
+    try:
+        from core.asset_groups import load_default_registry
+        asset_groups = load_default_registry(reload=True).list()
+    except Exception as exc:
+        logger.warning("AssetGroupRegistry unavailable (%s); using legacy bloc", exc)
+        asset_groups = list((config.get("asset_groups") or {}).keys()) or ["stocks", "crypto", "indices"]
     all_results = {}
 
     _print("\n[bold magenta]Starting Full Cycle: HMM + Backtest for all Asset Groups[/bold magenta]", console)
