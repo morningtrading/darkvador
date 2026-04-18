@@ -2626,10 +2626,13 @@ def run_cs_sweep(config: Dict, args: argparse.Namespace) -> None:
     )
 
     # ── Save ──────────────────────────────────────────────────────────────────
+    # Persist rows in the same Sharpe-descending order shown in the console
+    # tables so a human scanning the CSV sees the best configs first.
     _SAVED_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     ts = dt.datetime.now().strftime("%Y-%m-%d_%H%M%S")
     out_path = _SAVED_RESULTS_DIR / f"cs_sweep_{ts}.csv"
-    pd.DataFrame(rows).to_csv(out_path, index=False)
+    sorted_rows = sorted(rows, key=lambda x: x["sharpe"], reverse=True)
+    pd.DataFrame(sorted_rows).to_csv(out_path, index=False)
     _print(f"  Saved → {out_path}", console, style="dim")
 
 
