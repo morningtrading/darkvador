@@ -1,0 +1,32 @@
+# ─────────────────────────────────────────────────────────────
+#  Asset Groups — single source of truth
+#  Managed by: core/asset_groups.py
+#  CLI:        py -3.12 main.py groups <list|show|add|remove|edit|...>
+#  Schema:
+#    version:  integer (bump on breaking changes)
+#    default:  name of the default group (used when no --asset-group passed)
+#    groups:   mapping of name -> {description, asset_class, tags[], symbols[]}
+# ─────────────────────────────────────────────────────────────
+version: 1
+default: stocks
+groups:
+  stocks:
+    description: US large-cap equities
+    asset_class: equity
+    tags: [core, liquid, us]
+    symbols: [SPY, QQQ, AAPL, MSFT, AMZN, GOOGL, NVDA, META, TSLA, AMD]
+  crypto:
+    description: Top crypto pairs (Alpaca spot)
+    asset_class: crypto
+    tags: [crypto, 24x7]
+    symbols: [BTC/USD, ETH/USD, SOL/USD, AVAX/USD, DOGE/USD, LTC/USD, LINK/USD, UNI/USD]
+  indices:
+    description: Broad-market & sector ETFs
+    asset_class: etf
+    tags: [etf, diversified]
+    symbols: [SPY, QQQ, DIA, IWM, GLD, EFA, EEM, VNQ, EWG]
+  midcap:
+    description: US mid-cap growth names
+    asset_class: equity
+    tags: [midcap, growth, us]
+    symbols: [AXON, CRDO, FIX, POWL, KTOS, CACI, AEIS, ONTO, FTAI, IBP]
