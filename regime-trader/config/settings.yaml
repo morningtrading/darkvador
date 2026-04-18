@@ -1,45 +1,6 @@
-asset_groups:
-  stocks:
-  - SPY
-  - QQQ
-  - AAPL
-  - MSFT
-  - AMZN
-  - GOOGL
-  - NVDA
-  - META
-  - TSLA
-  - AMD
-  crypto:
-  - BTC/USD
-  - ETH/USD
-  - SOL/USD
-  - AVAX/USD
-  - DOGE/USD
-  - LTC/USD
-  - LINK/USD
-  - UNI/USD
-  indices:
-  - SPY
-  - QQQ
-  - DIA
-  - IWM
-  - GLD
-  - EFA
-  - EEM
-  - VNQ
-  - EWG
-  midcap:
-  - AXON
-  - CRDO
-  - FIX
-  - POWL
-  - KTOS
-  - CACI
-  - AEIS
-  - ONTO
-  - FTAI
-  - IBP
+# Asset groups live in config/asset_groups.yaml.
+# Manage them with: py -3.12 main.py groups <list|add|remove|edit|...>
+
 broker:
   paper_trading: true
   asset_group: stocks
