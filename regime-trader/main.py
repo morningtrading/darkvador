@@ -506,12 +506,44 @@ def _train_hmm(
     hmm_cfg: Dict,
     console=None,
     n_bars: int = 5_000,  # ~3 months of 5-min bars (78 bars/day × 65 days)
+    progress_cb=None,
 ) -> "HMMEngine":
-    """Fetch data, compute features, fit HMM, save to disk. Returns fitted engine."""
+    """Fetch data, compute features, fit HMM, save to disk. Returns fitted engine.
+
+    Parameters
+    ----------
+    progress_cb : Optional[Callable[[str, int, int], None]]
+        Invoked at the start of each stage with (stage_label, step_idx, total).
+        Useful for plugging an external progress bar (e.g. Rich Progress,
+        tqdm, or a GUI). When ``console`` is a Rich Console, the function
+        also displays a spinner next to the current stage via
+        ``console.status`` for built-in visual feedback.
+    """
+    from contextlib import nullcontext
     from core.hmm_engine import HMMEngine
     from data.feature_engineering import FeatureEngineer
 
     tf = hmm_cfg.get("timeframe", "5Min")
+
+    # ── Progress helper ────────────────────────────────────────────────────
+    # Emits a stage label through three channels:
+    #   1. the external `progress_cb` callback (for programmatic monitoring),
+    #   2. `_print` (permanent line in the output log),
+    #   3. a transient Rich `console.status()` spinner held until the
+    #      returned context manager exits.
+    _TOTAL_STAGES = 5
+
+    def _stage(idx: int, label: str):
+        if progress_cb is not None:
+            try:
+                progress_cb(label, idx, _TOTAL_STAGES)
+            except Exception as exc:
+                logger.debug("progress_cb raised (ignored): %s", exc)
+        _print(f"  [{idx}/{_TOTAL_STAGES}] {label}", console, style="dim")
+        if console is not None and hasattr(console, "status"):
+            return console.status(f"[dim]{label}[/dim]")
+        return nullcontext()
+
     _print(f"Training HMM on {tf} bars ...", console, style="dim")
 
     # Bars per calendar day for each timeframe (trading days only, ~252/year)
@@ -531,12 +563,13 @@ def _train_hmm(
         "%Y-%m-%dT%H:%M:%SZ"
     )
 
-    bars_df = client.get_bars(
-        symbols=symbols,
-        timeframe=tf,
-        start=start,
-        end=end,
-    )
+    with _stage(1, f"Fetching bars: {len(symbols)} symbols, {lookback_days}d lookback"):
+        bars_df = client.get_bars(
+            symbols=symbols,
+            timeframe=tf,
+            start=start,
+            end=end,
+        )
 
     if bars_df.empty:
         raise RuntimeError(f"No bars returned during HMM training")
@@ -560,9 +593,10 @@ def _train_hmm(
     sym_bars = _extract_sym(bars_df, ref_symbol)
 
     fe = FeatureEngineer()
-    features_clean = fe.build_feature_matrix(
-        sym_bars, feature_names=_hmm_feature_names(hmm_cfg)
-    )
+    with _stage(2, f"Computing features for {ref_symbol}"):
+        features_clean = fe.build_feature_matrix(
+            sym_bars, feature_names=_hmm_feature_names(hmm_cfg)
+        )
 
     # Blend log_ret_1 and realized_vol_20 across equity-like basket symbols.
     # Non-equity symbols (e.g. GLD, TLT, USO) are excluded via hmm_cfg.blend_exclude.
@@ -572,13 +606,14 @@ def _train_hmm(
             _per_symbol_bars[_s] = sym_bars if _s == ref_symbol else _extract_sym(bars_df, _s)
         except Exception:
             continue
-    features_clean = _blend_cross_symbol_features(
-        features_clean,
-        _per_symbol_bars,
-        feature_engineer=fe,
-        blend_exclude=hmm_cfg.get("blend_exclude", []),
-        min_bars=0,
-    )
+    with _stage(3, f"Blending features across {len(_per_symbol_bars)} symbols"):
+        features_clean = _blend_cross_symbol_features(
+            features_clean,
+            _per_symbol_bars,
+            feature_engineer=fe,
+            blend_exclude=hmm_cfg.get("blend_exclude", []),
+            min_bars=0,
+        )
 
     if len(features_clean) < hmm_cfg.get("min_train_bars", 252):
         raise RuntimeError(
@@ -595,9 +630,17 @@ def _train_hmm(
         min_confidence     = hmm_cfg.get("min_confidence", 0.55),
         min_train_bars     = hmm_cfg.get("min_train_bars", 252),
     )
-    engine.fit(features_clean.values)
+    _n_cands = hmm_cfg.get("n_candidates", [3, 4, 5])
+    _n_init  = hmm_cfg.get("n_init", 10)
+    with _stage(
+        4,
+        f"Fitting HMM: {len(features_clean)} bars × candidates={_n_cands} × n_init={_n_init}",
+    ):
+        engine.fit(features_clean.values)
     engine._n_train_bars = len(features_clean)   # stored for logging
-    engine.save(str(_MODEL_PATH))
+
+    with _stage(5, f"Saving model → {_MODEL_PATH.name}"):
+        engine.save(str(_MODEL_PATH))
 
     _print(
         f"  HMM trained: {engine._n_states} states  "
