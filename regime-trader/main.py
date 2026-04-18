@@ -238,21 +238,35 @@ def _resolve_symbols(config: Dict, asset_group: Optional[str], symbols_arg: Opti
     """
     Resolve the symbol list in priority order:
       1. --symbols flag (comma-separated)
-      2. --asset-group flag  → looks up config['asset_groups'][name]
-      3. broker.asset_group in config → looks up config['asset_groups'][name]
-      4. broker.symbols list in config
+      2. --asset-group flag  → AssetGroupRegistry (config/asset_groups.yaml)
+      3. broker.asset_group in config → AssetGroupRegistry
+      4. Legacy fallback: config['asset_groups'][name] (settings.yaml bloc)
+      5. broker.symbols list in config
     """
     if symbols_arg:
         return [s.strip() for s in symbols_arg.split(",")]
 
-    groups = config.get("asset_groups", {})
     group_name = asset_group or config.get("broker", {}).get("asset_group")
 
     if group_name:
-        syms = groups.get(group_name)
-        if syms:
-            return list(syms)
-        logger.warning("Asset group '%s' not found in config; falling back to broker.symbols", group_name)
+        # Primary: dedicated registry
+        try:
+            from core.asset_groups import load_default_registry
+            reg = load_default_registry(reload=True)
+            if reg.has(group_name):
+                return list(reg.get(group_name).symbols)
+        except Exception as exc:
+            logger.debug("AssetGroupRegistry unavailable (%s); trying legacy bloc", exc)
+
+        # Legacy fallback: old bloc in settings.yaml
+        legacy = config.get("asset_groups", {}) or {}
+        if group_name in legacy:
+            logger.warning(
+                "Asset group '%s' loaded from legacy settings.yaml bloc; "
+                "please migrate to config/asset_groups.yaml", group_name)
+            return list(legacy[group_name])
+
+        logger.warning("Asset group '%s' not found; falling back to broker.symbols", group_name)
 
     return config.get("broker", {}).get("symbols", ["SPY"])
 
