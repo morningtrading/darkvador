@@ -549,6 +549,18 @@ class StrategyOrchestrator:
         #   MidVolCautious   → LowVolBull      (upgrade to fully invested)
         # Set sma_trend_gate: false to disable.
         self._sma_gate: bool = strategy_cfg.get("sma_trend_gate", True)
+        # HARD SMA gate: when enabled, FORCE flat (allocation 0) whenever
+        # the market proxy closes below its 200-bar SMA, regardless of the
+        # HMM regime. This is the "HMM × SMA overlay" — SMA handles trend
+        # participation, HMM modulates sizing within the long phase.
+        # Expected to trade some HMM upside for dramatically lower
+        # drawdown / volatility (the SMA-200 benchmark MaxDD is ~-13% vs
+        # HMM's -23%). Default OFF for backward compatibility.
+        self._sma_hard_gate: bool = strategy_cfg.get("sma_hard_gate", False)
+        # SOFT SMA overlay: multiply per-symbol sizes by this factor when
+        # the market proxy is below SMA-200. 1.0 = disabled (default), 0.5
+        # = halve sizes, 0.0 = equivalent to sma_hard_gate.
+        self._sma_soft_mult: float = float(strategy_cfg.get("sma_soft_mult", 1.0))
         self._sma_gate_mid_strategy: BaseStrategy = MidVolCautiousStrategy(
             allocation_above_ema=self._mid_trend_allocation,
             allocation_below_ema=self._mid_notrd_allocation,
@@ -665,6 +677,62 @@ class StrategyOrchestrator:
             )
             return []
 
+        # ── SMA-200 HARD gate (overlay) ───────────────────────────────────────
+        # Force flat when market proxy is below SMA-200, regardless of HMM.
+        # This combines the SMA-200 benchmark's trend filter with the HMM's
+        # regime-aware sizing. Runs BEFORE any other logic.
+        if self._sma_hard_gate:
+            mkt_sym = symbols[0] if symbols else None
+            mkt_bars = bars.get(mkt_sym) if mkt_sym else None
+            if mkt_bars is not None and len(mkt_bars) >= 200:
+                close  = mkt_bars["close"]
+                sma200 = close.iloc[-200:].mean()
+                if close.iloc[-1] < sma200:
+                    # Emit flat signals (position_size_pct = 0) for every
+                    # currently-held symbol so the rebalancer sells down.
+                    flat_signals: List[Signal] = []
+                    gate_reason = (
+                        f"sma_hard_gate: {mkt_sym} {close.iloc[-1]:.2f} "
+                        f"< SMA200 {sma200:.2f}"
+                    )
+                    for sym in symbols:
+                        current = self._current_weights.get(sym, 0.0)
+                        if abs(current) <= 1e-6:
+                            continue
+                        sym_bars = bars.get(sym)
+                        last_close = (
+                            float(sym_bars["close"].iloc[-1])
+                            if sym_bars is not None and len(sym_bars) > 0
+                            else 0.0
+                        )
+                        last_ts = (
+                            sym_bars.index[-1]
+                            if sym_bars is not None and len(sym_bars) > 0
+                            else pd.Timestamp.now()
+                        )
+                        flat_signals.append(Signal(
+                            symbol=sym,
+                            direction=Direction.FLAT,
+                            confidence=regime_state.probability,
+                            entry_price=last_close,
+                            stop_loss=0.0,
+                            take_profit=None,
+                            position_size_pct=0.0,
+                            leverage=1.0,
+                            regime_id=regime_state.state_id,
+                            regime_name=regime_state.label,
+                            regime_probability=regime_state.probability,
+                            timestamp=last_ts,
+                            reasoning=gate_reason,
+                            strategy_name="SMAHardGate",
+                        ))
+                    if flat_signals:
+                        logger.info(
+                            "SMA hard gate ACTIVE: %s %.2f < SMA200 %.2f → FLAT %d symbols",
+                            mkt_sym, close.iloc[-1], sma200, len(flat_signals),
+                        )
+                    return flat_signals
+
         # ── SMA-200 trend gate ────────────────────────────────────────────────
         # If the HMM picked a fully defensive (HighVol) strategy but the market
         # proxy is still above its 200-bar SMA, the trend has not broken down —
@@ -723,6 +791,24 @@ class StrategyOrchestrator:
                 if s.direction == Direction.LONG:
                     # Convert strategy-level total allocation to per-symbol weight
                     s.position_size_pct = round(s.position_size_pct / n_long, 6)
+
+        # ── Soft SMA overlay: scale down when market < SMA200 ─────────────────
+        if self._sma_soft_mult < 1.0 and n_long > 0:
+            mkt_sym = symbols[0] if symbols else None
+            mkt_bars = bars.get(mkt_sym) if mkt_sym else None
+            if mkt_bars is not None and len(mkt_bars) >= 200:
+                close = mkt_bars["close"]
+                sma200 = close.iloc[-200:].mean()
+                if close.iloc[-1] < sma200:
+                    for s in raw:
+                        if s.direction == Direction.LONG:
+                            s.position_size_pct = round(
+                                s.position_size_pct * self._sma_soft_mult, 6
+                            )
+                    logger.info(
+                        "SMA soft overlay: %s %.2f < SMA200 %.2f → size x%.2f",
+                        mkt_sym, close.iloc[-1], sma200, self._sma_soft_mult,
+                    )
 
         # ── Rebalance filter ──────────────────────────────────────────────────
         filtered: List[Signal] = []

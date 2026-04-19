@@ -5,7 +5,7 @@ hmm:
   n_candidates: [3, 4, 5, 6]    # drop 7-state (overfits on daily data)
   stability_bars: 7              # joint optimum with interval=5 (interval sweep: 0.689)
   flicker_threshold: 4           # reasonable tolerance
-  min_confidence: 0.62           # joint optimum: cs-sweep plateau 0.55-0.65, 0.62 centre
+  min_confidence: 0.62           # plateau: 0.62/0.68/0.75 all give Sharpe ~0.45 on indices — reverted
 
 strategy:
   mid_vol_allocation_no_trend: 0.70
