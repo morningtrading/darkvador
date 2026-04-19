@@ -53,6 +53,10 @@ strategy:
   trend_min_slope: 0.0
   sma_hard_gate: false  # force flat when market proxy < SMA200. Tested: degrades indices Sharpe 0.446 -> 0.273 (double-filter kills signal). Kept as opt-in tool.
   sma_soft_mult: 1.0    # 1.0 = disabled. Sweep on indices: 0.7 → Sharpe 0.442 / MaxDD -19.5%; 0.5 → Sharpe 0.425 / MaxDD -17.3%; 1.0 → Sharpe 0.446 / MaxDD -22.9%. Keep off by default; opt-in for drawdown-sensitive users.
+  vol_target_annual: 0.12  # scale LONG sizes to realize this annualized vol. 0 = disabled.
+  vol_target_min_mult: 0.25
+  vol_target_max_mult: 1.50
+  vol_target_window: 20
 risk:
   max_risk_per_trade: 0.01
   max_single_position: 0.15

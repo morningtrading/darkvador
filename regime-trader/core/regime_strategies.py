@@ -561,6 +561,13 @@ class StrategyOrchestrator:
         # the market proxy is below SMA-200. 1.0 = disabled (default), 0.5
         # = halve sizes, 0.0 = equivalent to sma_hard_gate.
         self._sma_soft_mult: float = float(strategy_cfg.get("sma_soft_mult", 1.0))
+        # Volatility targeting: scale LONG sizes so portfolio realizes the
+        # given annualized vol. 0 = disabled. Typical targets: 0.08-0.12.
+        # Cap multiplier in [_vol_target_min_mult, _vol_target_max_mult].
+        self._vol_target_annual: float  = float(strategy_cfg.get("vol_target_annual", 0.0))
+        self._vol_target_min_mult: float = float(strategy_cfg.get("vol_target_min_mult", 0.25))
+        self._vol_target_max_mult: float = float(strategy_cfg.get("vol_target_max_mult", 1.50))
+        self._vol_target_window: int    = int(strategy_cfg.get("vol_target_window", 20))
         self._sma_gate_mid_strategy: BaseStrategy = MidVolCautiousStrategy(
             allocation_above_ema=self._mid_trend_allocation,
             allocation_below_ema=self._mid_notrd_allocation,
@@ -791,6 +798,34 @@ class StrategyOrchestrator:
                 if s.direction == Direction.LONG:
                     # Convert strategy-level total allocation to per-symbol weight
                     s.position_size_pct = round(s.position_size_pct / n_long, 6)
+
+        # ── Volatility targeting ──────────────────────────────────────────────
+        # Scale LONG sizes so the portfolio realizes ~self._vol_target_annual.
+        # Uses the market proxy's trailing realized vol as a cheap proxy for
+        # portfolio vol (positions are mostly correlated within a basket).
+        if self._vol_target_annual > 0.0 and n_long > 0:
+            mkt_sym = symbols[0] if symbols else None
+            mkt_bars = bars.get(mkt_sym) if mkt_sym else None
+            w = self._vol_target_window
+            if mkt_bars is not None and len(mkt_bars) >= w + 1:
+                import numpy as _np
+                close = mkt_bars["close"]
+                log_ret = _np.log(close / close.shift(1)).iloc[-w:]
+                daily_std = float(log_ret.std())
+                realized_ann = daily_std * (252 ** 0.5)
+                if realized_ann > 1e-6:
+                    scale = self._vol_target_annual / realized_ann
+                    scale = max(self._vol_target_min_mult,
+                                min(self._vol_target_max_mult, scale))
+                    for s in raw:
+                        if s.direction == Direction.LONG:
+                            s.position_size_pct = round(
+                                s.position_size_pct * scale, 6
+                            )
+                    logger.info(
+                        "Vol target: realized_ann=%.3f target=%.3f scale=%.3f",
+                        realized_ann, self._vol_target_annual, scale,
+                    )
 
         # ── Soft SMA overlay: scale down when market < SMA200 ─────────────────
         if self._sma_soft_mult < 1.0 and n_long > 0:
