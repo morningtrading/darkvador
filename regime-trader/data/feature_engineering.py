@@ -52,6 +52,9 @@ FEATURE_COLUMNS: List[str] = [
     # to build_feature_matrix; otherwise NaN and dropped by warm-up).
     "vix_level",
     "vix_zscore_60",
+    # Cross-asset credit spread (HYG/LQD z-score) — populated when
+    # credit_series is provided. Already z-scored by the fetcher.
+    "credit_spread_z60",
 ]
 
 # ── HMM feature presets (referenced by main.py and backtester.py) ─────────────
@@ -77,6 +80,11 @@ HMM_EXTENDED_VIX_FEATURES: List[str] = HMM_EXTENDED_FEATURES + [
     # stationary-ish and gave +70% Sharpe over EXTENDED baseline on indices.
     "vix_zscore_60",
 ]
+# Extended + VIX + Credit Spread (HYG/LQD z-score). Orthogonal to equity
+# vol — captures credit-cycle stress the VIX misses.
+HMM_EXTENDED_VIX_CREDIT_FEATURES: List[str] = HMM_EXTENDED_VIX_FEATURES + [
+    "credit_spread_z60",
+]
 
 
 def hmm_feature_names(hmm_cfg: dict) -> List[str]:
@@ -85,12 +93,15 @@ def hmm_feature_names(hmm_cfg: dict) -> List[str]:
     Priority:
       1. ``hmm.features_override`` (explicit list, wins if non-empty) —
          used for ablation studies / custom feature sets.
-      2. ``hmm.use_vix_features`` boolean → EXTENDED + VIX set.
-      3. ``hmm.extended_features`` boolean toggle (default True).
+      2. ``hmm.use_credit_spread_features`` boolean → EXTENDED + VIX + CREDIT.
+      3. ``hmm.use_vix_features`` boolean → EXTENDED + VIX set.
+      4. ``hmm.extended_features`` boolean toggle (default True).
     """
     override = hmm_cfg.get("features_override")
     if override:
         return list(override)
+    if hmm_cfg.get("use_credit_spread_features", False):
+        return HMM_EXTENDED_VIX_CREDIT_FEATURES
     if hmm_cfg.get("use_vix_features", False):
         return HMM_EXTENDED_VIX_FEATURES
     if hmm_cfg.get("extended_features", True):
@@ -368,6 +379,7 @@ class FeatureEngineer:
         self,
         ohlcv: pd.DataFrame,
         vix_series: Optional[pd.Series] = None,
+        credit_series: Optional[pd.Series] = None,
     ) -> pd.DataFrame:
         """
         Compute and z-score all features.
@@ -438,6 +450,15 @@ class FeatureEngineer:
             raw["vix_level"] = np.nan
             raw["vix_zscore_60"] = np.nan
 
+        # ── Credit spread cross-asset feature ─────────────────────────────────
+        # HYG/LQD z-score is pre-computed by the fetcher. Just align & carry.
+        if credit_series is not None and not credit_series.empty:
+            raw["credit_spread_z60"] = (
+                credit_series.reindex(ohlcv.index, method="ffill").astype(float)
+            )
+        else:
+            raw["credit_spread_z60"] = np.nan
+
         # ── Rolling z-score standardisation ──────────────────────────────────
         standardised = pd.DataFrame(index=ohlcv.index)
         for col in FEATURE_COLUMNS:
@@ -453,6 +474,7 @@ class FeatureEngineer:
         feature_names: Optional[List[str]] = None,
         dropna: bool = True,
         vix_series: Optional[pd.Series] = None,
+        credit_series: Optional[pd.Series] = None,
     ) -> pd.DataFrame:
         """
         Build the standardised feature DataFrame ready for HMM training.
@@ -470,7 +492,7 @@ class FeatureEngineer:
         -------
         DataFrame with selected feature columns and NaN rows removed.
         """
-        df = self.compute(ohlcv, vix_series=vix_series)
+        df = self.compute(ohlcv, vix_series=vix_series, credit_series=credit_series)
         if feature_names:
             unknown = [c for c in feature_names if c not in df.columns]
             if unknown:

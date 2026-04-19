@@ -57,8 +57,9 @@ from data.feature_engineering import hmm_feature_names as _hmm_feature_names
 
 
 def _maybe_fetch_vix(hmm_cfg: Dict, bars_index) -> "pd.Series | None":
-    """Fetch VIX series if hmm_cfg['use_vix_features'] is truthy. Cached per call."""
-    if not hmm_cfg.get("use_vix_features", False):
+    """Fetch VIX series if hmm_cfg['use_vix_features'] OR ['use_credit_spread_features'] is truthy."""
+    if not (hmm_cfg.get("use_vix_features", False)
+            or hmm_cfg.get("use_credit_spread_features", False)):
         return None
     try:
         from data.vix_fetcher import fetch_vix_series
@@ -72,6 +73,22 @@ def _maybe_fetch_vix(hmm_cfg: Dict, bars_index) -> "pd.Series | None":
         return fetch_vix_series(start=start, end=end, timeframe="1Day")
     except Exception as exc:
         logger.warning("VIX fetch skipped: %s", exc)
+        return None
+
+
+def _maybe_fetch_credit(hmm_cfg: Dict, bars_index) -> "pd.Series | None":
+    """Fetch HYG/LQD credit spread z-score if hmm_cfg['use_credit_spread_features'] is truthy."""
+    if not hmm_cfg.get("use_credit_spread_features", False):
+        return None
+    try:
+        from data.credit_spread_fetcher import fetch_credit_spread_series
+        if bars_index is None or len(bars_index) == 0:
+            return None
+        start = (pd.Timestamp(bars_index[0]) - pd.Timedelta(days=120)).date().isoformat()
+        end   = (pd.Timestamp(bars_index[-1]) + pd.Timedelta(days=1)).date().isoformat()
+        return fetch_credit_spread_series(start=start, end=end, timeframe="1Day")
+    except Exception as exc:
+        logger.warning("Credit spread fetch skipped: %s", exc)
         return None
 
 
@@ -698,9 +715,10 @@ def _train_hmm(
     fe = FeatureEngineer()
     with _stage(2, f"Computing features for {ref_symbol}"):
         _vix = _maybe_fetch_vix(hmm_cfg, sym_bars.index)
+        _credit = _maybe_fetch_credit(hmm_cfg, sym_bars.index)
         features_clean = fe.build_feature_matrix(
             sym_bars, feature_names=_hmm_feature_names(hmm_cfg),
-            vix_series=_vix,
+            vix_series=_vix, credit_series=_credit,
         )
 
     # Blend log_ret_1 and realized_vol_20 across equity-like basket symbols.
@@ -1119,9 +1137,10 @@ class TradingSession:
                 from core.hmm_engine import RegimeState
                 _fe      = FeatureEngineer()
                 _vix = _maybe_fetch_vix(hmm_cfg, _ref_df.index)
+                _credit = _maybe_fetch_credit(hmm_cfg, _ref_df.index)
                 _feat_df = _fe.build_feature_matrix(
                     _ref_df, feature_names=_hmm_feature_names(hmm_cfg),
-                    vix_series=_vix,
+                    vix_series=_vix, credit_series=_credit,
                 )
                 # Blend log_ret_1 / realized_vol_20 across equity-like symbols
                 _sp_bars = {_ref_sym: _ref_df}
@@ -1301,9 +1320,10 @@ class TradingSession:
                 from data.feature_engineering import FeatureEngineer
                 fe = FeatureEngineer()
                 _vix = _maybe_fetch_vix(hmm_cfg, ref_bars.index)
+                _credit = _maybe_fetch_credit(hmm_cfg, ref_bars.index)
                 features_clean = fe.build_feature_matrix(
                     ref_bars, feature_names=_hmm_feature_names(hmm_cfg),
-                    vix_series=_vix,
+                    vix_series=_vix, credit_series=_credit,
                 )
                 # Blend log_ret_1 / realized_vol_20 across equity-like symbols
                 _lp_bars = {ref_sym: ref_bars}
@@ -1814,6 +1834,7 @@ def run_backtest(config: Dict, args: argparse.Namespace) -> None:
         "extended_features":  hmm_cfg_raw.get("extended_features", True),
         "features_override":  hmm_cfg_raw.get("features_override"),
         "use_vix_features":   hmm_cfg_raw.get("use_vix_features", False),
+        "use_credit_spread_features": hmm_cfg_raw.get("use_credit_spread_features", False),
         "blend_exclude":      hmm_cfg_raw.get("blend_exclude", []),
     }
     strategy_config = {"strategy": config.get("strategy", {})}
@@ -2397,6 +2418,7 @@ def run_interval_sweep(config: Dict, args: argparse.Namespace) -> None:
         "extended_features":  hmm_cfg_raw.get("extended_features", True),
         "features_override":  hmm_cfg_raw.get("features_override"),
         "use_vix_features":   hmm_cfg_raw.get("use_vix_features", False),
+        "use_credit_spread_features": hmm_cfg_raw.get("use_credit_spread_features", False),
         "blend_exclude":      hmm_cfg_raw.get("blend_exclude", []),
     }
     strategy_config = {"strategy": config.get("strategy", {})}
@@ -2639,6 +2661,7 @@ def run_cs_sweep(config: Dict, args: argparse.Namespace) -> None:
         "extended_features":  hmm_cfg_raw.get("extended_features", True),
         "features_override":  hmm_cfg_raw.get("features_override"),
         "use_vix_features":   hmm_cfg_raw.get("use_vix_features", False),
+        "use_credit_spread_features": hmm_cfg_raw.get("use_credit_spread_features", False),
         "blend_exclude":      hmm_cfg_raw.get("blend_exclude", []),
     }
     strategy_config = {"strategy": config.get("strategy", {})}

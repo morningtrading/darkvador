@@ -35,6 +35,7 @@ hmm:
   min_confidence: 0.68           # joint optimum: interval+cs sweeps on indices 2020-2026
   extended_features: true   # true (default): adds vol_ratio, adx_14, dist_sma200 — set false to revert to base only
   use_vix_features: true     # adds vix_zscore_60 cross-asset feature (fetches ^VIX daily via yfinance, VXX fallback). Indices: Sharpe 0.263 -> 0.446, MaxDD -31% -> -23%
+  use_credit_spread_features: false  # adds credit_spread_z60 = z-score(HYG/LQD ratio). Indices test: redundant with VIX_zscore (stacking hurts 0.446 -> 0.350); alone on EXT marginal (+0.024 Sharpe). Kept as opt-in.
   features:
   - log_ret_1
   - realized_vol_20

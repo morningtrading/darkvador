@@ -40,7 +40,8 @@ from data.feature_engineering import FeatureEngineer, hmm_feature_names as _hmm_
 
 
 def _maybe_fetch_vix_bt(hmm_cfg: Dict, bars_index) -> "pd.Series | None":
-    if not hmm_cfg.get("use_vix_features", False):
+    if not (hmm_cfg.get("use_vix_features", False)
+            or hmm_cfg.get("use_credit_spread_features", False)):
         return None
     try:
         from data.vix_fetcher import fetch_vix_series
@@ -49,6 +50,20 @@ def _maybe_fetch_vix_bt(hmm_cfg: Dict, bars_index) -> "pd.Series | None":
         start = (pd.Timestamp(bars_index[0]) - pd.Timedelta(days=5)).date().isoformat()
         end   = (pd.Timestamp(bars_index[-1]) + pd.Timedelta(days=1)).date().isoformat()
         return fetch_vix_series(start=start, end=end, timeframe="1Day")
+    except Exception:
+        return None
+
+
+def _maybe_fetch_credit_bt(hmm_cfg: Dict, bars_index) -> "pd.Series | None":
+    if not hmm_cfg.get("use_credit_spread_features", False):
+        return None
+    try:
+        from data.credit_spread_fetcher import fetch_credit_spread_series
+        if bars_index is None or len(bars_index) == 0:
+            return None
+        start = (pd.Timestamp(bars_index[0]) - pd.Timedelta(days=120)).date().isoformat()
+        end   = (pd.Timestamp(bars_index[-1]) + pd.Timedelta(days=1)).date().isoformat()
+        return fetch_credit_spread_series(start=start, end=end, timeframe="1Day")
     except Exception:
         return None
 
@@ -296,11 +311,13 @@ class WalkForwardBacktester:
             volume_norm_window=self.volume_norm_window,
         )
         _vix_bt = _maybe_fetch_vix_bt(hmm_cfg, ohlcv[market_sym].index)
+        _credit_bt = _maybe_fetch_credit_bt(hmm_cfg, ohlcv[market_sym].index)
         full_features_raw = fe.build_feature_matrix(
             ohlcv[market_sym],
             feature_names=_hmm_feature_names(hmm_cfg),
             dropna=False,
             vix_series=_vix_bt,
+            credit_series=_credit_bt,
         )
 
         # Blend log_ret_1 and realized_vol_20 across equity-like symbols so the
@@ -951,11 +968,13 @@ class WalkForwardBacktester:
             volume_norm_window=self.volume_norm_window,
         )
         _vix_bt = _maybe_fetch_vix_bt(hmm_cfg, ohlcv[market_sym].index)
+        _credit_bt = _maybe_fetch_credit_bt(hmm_cfg, ohlcv[market_sym].index)
         full_features_raw = fe.build_feature_matrix(
             ohlcv[market_sym],
             feature_names=_hmm_feature_names(hmm_cfg),
             dropna=False,
             vix_series=_vix_bt,
+            credit_series=_credit_bt,
         )
 
         # Blend log_ret_1 and realized_vol_20 across all symbols so the HMM sees
