@@ -1757,7 +1757,7 @@ def run_backtest(config: Dict, args: argparse.Namespace) -> None:
     )
 
     bt_cfg = config.get("backtest", {})
-    start_date: str = args.start or "2018-01-01"
+    start_date: str = args.start or "2020-01-01"
     end_date: str   = args.end   or pd.Timestamp.today().strftime("%Y-%m-%d")
     output_dir      = _saved_results_backtest_dir()
     # keep legacy results/ dir in sync for tools that read from it
@@ -2366,7 +2366,7 @@ def run_interval_sweep(config: Dict, args: argparse.Namespace) -> None:
     )
 
     bt_cfg          = config.get("backtest", {})
-    start_date: str = getattr(args, "start", None) or "2018-01-01"
+    start_date: str = getattr(args, "start", None) or "2020-01-01"
     end_date: str   = getattr(args, "end",   None) or pd.Timestamp.today().strftime("%Y-%m-%d")
 
     initial_capital = float(bt_cfg.get("initial_capital", 100_000))
@@ -2609,7 +2609,7 @@ def run_cs_sweep(config: Dict, args: argparse.Namespace) -> None:
     )
 
     bt_cfg          = config.get("backtest", {})
-    start_date: str = getattr(args, "start", None) or "2018-01-01"
+    start_date: str = getattr(args, "start", None) or "2020-01-01"
     end_date: str   = getattr(args, "end",   None) or pd.Timestamp.today().strftime("%Y-%m-%d")
 
     initial_capital = float(bt_cfg.get("initial_capital", 100_000))
