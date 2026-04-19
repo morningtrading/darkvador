@@ -48,6 +48,10 @@ FEATURE_COLUMNS: List[str] = [
     "roc_10",
     "roc_20",
     "norm_atr_14",
+    # Cross-asset VIX-based features (populated when vix_series is provided
+    # to build_feature_matrix; otherwise NaN and dropped by warm-up).
+    "vix_level",
+    "vix_zscore_60",
 ]
 
 # ── HMM feature presets (referenced by main.py and backtester.py) ─────────────
@@ -63,6 +67,12 @@ HMM_EXTENDED_FEATURES: List[str] = [
     "adx_14",
     "dist_sma200",
 ]
+# Extended + VIX cross-asset features. Requires a VIX/VXX series to be
+# supplied to build_feature_matrix; otherwise rows are dropped as warm-up.
+HMM_EXTENDED_VIX_FEATURES: List[str] = HMM_EXTENDED_FEATURES + [
+    "vix_level",
+    "vix_zscore_60",
+]
 
 
 def hmm_feature_names(hmm_cfg: dict) -> List[str]:
@@ -71,11 +81,14 @@ def hmm_feature_names(hmm_cfg: dict) -> List[str]:
     Priority:
       1. ``hmm.features_override`` (explicit list, wins if non-empty) —
          used for ablation studies / custom feature sets.
-      2. ``hmm.extended_features`` boolean toggle (default True).
+      2. ``hmm.use_vix_features`` boolean → EXTENDED + VIX set.
+      3. ``hmm.extended_features`` boolean toggle (default True).
     """
     override = hmm_cfg.get("features_override")
     if override:
         return list(override)
+    if hmm_cfg.get("use_vix_features", False):
+        return HMM_EXTENDED_VIX_FEATURES
     if hmm_cfg.get("extended_features", True):
         return HMM_EXTENDED_FEATURES
     return HMM_BASE_FEATURES
@@ -347,7 +360,11 @@ class FeatureEngineer:
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
-    def compute(self, ohlcv: pd.DataFrame) -> pd.DataFrame:
+    def compute(
+        self,
+        ohlcv: pd.DataFrame,
+        vix_series: Optional[pd.Series] = None,
+    ) -> pd.DataFrame:
         """
         Compute and z-score all features.
 
@@ -356,10 +373,15 @@ class FeatureEngineer:
         ohlcv :
             DataFrame with columns ``[open, high, low, close, volume]``.
             Index must be a DatetimeIndex sorted ascending.
+        vix_series :
+            Optional VIX (or VXX) close series indexed like ``ohlcv``.
+            When provided, ``vix_level`` and ``vix_zscore_60`` features are
+            populated; otherwise they are NaN and dropped by the warm-up
+            filter when included in ``feature_names``.
 
         Returns
         -------
-        DataFrame of shape ``(n_bars, 14)`` with columns :data:`FEATURE_COLUMNS`.
+        DataFrame of shape ``(n_bars, len(FEATURE_COLUMNS))``.
         Rows within the warm-up period contain NaN.
         """
         close = ohlcv["close"]
@@ -397,9 +419,26 @@ class FeatureEngineer:
         # ── Range ─────────────────────────────────────────────────────────────
         raw["norm_atr_14"] = compute_normalized_atr(high, low, close, self.adx_period)
 
+        # ── VIX cross-asset features ────────────────────────────────────────
+        # Only populated when a VIX/VXX series is supplied. Fills to NaN
+        # otherwise, which causes build_feature_matrix to drop these rows
+        # during warm-up — so the baseline path (no VIX) still works.
+        if vix_series is not None and not vix_series.empty:
+            vix_aligned = vix_series.reindex(ohlcv.index, method="ffill").astype(float)
+            # Log to compress scale (VIX can span 9-80)
+            raw["vix_level"] = np.log(vix_aligned.clip(lower=1e-6))
+            vix_mean = vix_aligned.rolling(60, min_periods=20).mean()
+            vix_std  = vix_aligned.rolling(60, min_periods=20).std()
+            raw["vix_zscore_60"] = (vix_aligned - vix_mean) / vix_std.replace(0, np.nan)
+        else:
+            raw["vix_level"] = np.nan
+            raw["vix_zscore_60"] = np.nan
+
         # ── Rolling z-score standardisation ──────────────────────────────────
         standardised = pd.DataFrame(index=ohlcv.index)
         for col in FEATURE_COLUMNS:
+            # vix_level is already log-transformed; z-score both VIX features
+            # the same way as the rest for consistent HMM input scale.
             standardised[col] = rolling_zscore(raw[col], self.zscore_window)
 
         return standardised
@@ -409,6 +448,7 @@ class FeatureEngineer:
         ohlcv: pd.DataFrame,
         feature_names: Optional[List[str]] = None,
         dropna: bool = True,
+        vix_series: Optional[pd.Series] = None,
     ) -> pd.DataFrame:
         """
         Build the standardised feature DataFrame ready for HMM training.
@@ -426,7 +466,7 @@ class FeatureEngineer:
         -------
         DataFrame with selected feature columns and NaN rows removed.
         """
-        df = self.compute(ohlcv)
+        df = self.compute(ohlcv, vix_series=vix_series)
         if feature_names:
             unknown = [c for c in feature_names if c not in df.columns]
             if unknown:

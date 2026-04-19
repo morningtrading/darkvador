@@ -56,6 +56,25 @@ from data.feature_blending import blend_cross_symbol_features as _blend_cross_sy
 from data.feature_engineering import hmm_feature_names as _hmm_feature_names
 
 
+def _maybe_fetch_vix(hmm_cfg: Dict, bars_index) -> "pd.Series | None":
+    """Fetch VIX series if hmm_cfg['use_vix_features'] is truthy. Cached per call."""
+    if not hmm_cfg.get("use_vix_features", False):
+        return None
+    try:
+        from data.vix_fetcher import fetch_vix_series
+        if bars_index is None or len(bars_index) == 0:
+            return None
+        start = pd.Timestamp(bars_index[0]).tz_localize(None) if hasattr(pd.Timestamp(bars_index[0]), "tz_localize") else pd.Timestamp(bars_index[0])
+        end   = pd.Timestamp(bars_index[-1]).tz_localize(None) if hasattr(pd.Timestamp(bars_index[-1]), "tz_localize") else pd.Timestamp(bars_index[-1])
+        # widen by a couple of days so ffill has a head value
+        start = (start - pd.Timedelta(days=5)).date().isoformat()
+        end   = (end   + pd.Timedelta(days=1)).date().isoformat()
+        return fetch_vix_series(start=start, end=end, timeframe="1Day")
+    except Exception as exc:
+        logger.warning("VIX fetch skipped: %s", exc)
+        return None
+
+
 # ── Saved-results helpers ──────────────────────────────────────────────────────
 
 def _saved_results_backtest_dir() -> Path:
@@ -385,7 +404,7 @@ def _print_run_config(
         f"{'─' * 62}",
         f"  Assets      : {', '.join(symbols)}",
         f"  Period      : {start_date}  →  {end_date}",
-        f"  Frequency   : {broker_cfg.get('timeframe', '5Min')} bars",
+        f"  Frequency   : 1Day bars (backtest — live broker uses {broker_cfg.get('timeframe', '5Min')})",
         f"  Capital     : ${float(bt_cfg.get('initial_capital', 100_000)):,.0f}   "
         f"Slippage: {float(bt_cfg.get('slippage_pct', 0.0005)) * 10_000:.1f} bps",
         f"  Walk-fwd    : IS {bt_cfg.get('train_window', 252)} / "
@@ -399,7 +418,7 @@ def _print_run_config(
         f"flicker_thresh={hmm_cfg.get('flicker_threshold', 4)}  "
         f"flicker_win={hmm_cfg.get('flicker_window', 20)}  "
         f"min_conf={hmm_cfg.get('min_confidence', 0.55)}",
-        f"  Features    : {', '.join(hmm_cfg.get('features', []))}",
+        f"  Features    : {', '.join(_hmm_feature_names(hmm_cfg))}",
         f"",
         f"  Allocation  : low_vol={strategy_cfg.get('low_vol_allocation', 0.95)}×"
         f"{strategy_cfg.get('low_vol_leverage', 1.25)}x  "
@@ -678,8 +697,10 @@ def _train_hmm(
 
     fe = FeatureEngineer()
     with _stage(2, f"Computing features for {ref_symbol}"):
+        _vix = _maybe_fetch_vix(hmm_cfg, sym_bars.index)
         features_clean = fe.build_feature_matrix(
-            sym_bars, feature_names=_hmm_feature_names(hmm_cfg)
+            sym_bars, feature_names=_hmm_feature_names(hmm_cfg),
+            vix_series=_vix,
         )
 
     # Blend log_ret_1 and realized_vol_20 across equity-like basket symbols.
@@ -1097,8 +1118,10 @@ class TradingSession:
                 from data.feature_engineering import FeatureEngineer
                 from core.hmm_engine import RegimeState
                 _fe      = FeatureEngineer()
+                _vix = _maybe_fetch_vix(hmm_cfg, _ref_df.index)
                 _feat_df = _fe.build_feature_matrix(
-                    _ref_df, feature_names=_hmm_feature_names(hmm_cfg)
+                    _ref_df, feature_names=_hmm_feature_names(hmm_cfg),
+                    vix_series=_vix,
                 )
                 # Blend log_ret_1 / realized_vol_20 across equity-like symbols
                 _sp_bars = {_ref_sym: _ref_df}
@@ -1277,8 +1300,10 @@ class TradingSession:
             try:
                 from data.feature_engineering import FeatureEngineer
                 fe = FeatureEngineer()
+                _vix = _maybe_fetch_vix(hmm_cfg, ref_bars.index)
                 features_clean = fe.build_feature_matrix(
-                    ref_bars, feature_names=_hmm_feature_names(hmm_cfg)
+                    ref_bars, feature_names=_hmm_feature_names(hmm_cfg),
+                    vix_series=_vix,
                 )
                 # Blend log_ret_1 / realized_vol_20 across equity-like symbols
                 _lp_bars = {ref_sym: ref_bars}
@@ -1788,6 +1813,7 @@ def run_backtest(config: Dict, args: argparse.Namespace) -> None:
         # was always using HMM_EXTENDED_FEATURES regardless of settings.yaml).
         "extended_features":  hmm_cfg_raw.get("extended_features", True),
         "features_override":  hmm_cfg_raw.get("features_override"),
+        "use_vix_features":   hmm_cfg_raw.get("use_vix_features", False),
         "blend_exclude":      hmm_cfg_raw.get("blend_exclude", []),
     }
     strategy_config = {"strategy": config.get("strategy", {})}
@@ -2370,6 +2396,7 @@ def run_interval_sweep(config: Dict, args: argparse.Namespace) -> None:
         # was always using HMM_EXTENDED_FEATURES regardless of settings.yaml).
         "extended_features":  hmm_cfg_raw.get("extended_features", True),
         "features_override":  hmm_cfg_raw.get("features_override"),
+        "use_vix_features":   hmm_cfg_raw.get("use_vix_features", False),
         "blend_exclude":      hmm_cfg_raw.get("blend_exclude", []),
     }
     strategy_config = {"strategy": config.get("strategy", {})}
@@ -2611,6 +2638,7 @@ def run_cs_sweep(config: Dict, args: argparse.Namespace) -> None:
         # was always using HMM_EXTENDED_FEATURES regardless of settings.yaml).
         "extended_features":  hmm_cfg_raw.get("extended_features", True),
         "features_override":  hmm_cfg_raw.get("features_override"),
+        "use_vix_features":   hmm_cfg_raw.get("use_vix_features", False),
         "blend_exclude":      hmm_cfg_raw.get("blend_exclude", []),
     }
     strategy_config = {"strategy": config.get("strategy", {})}
