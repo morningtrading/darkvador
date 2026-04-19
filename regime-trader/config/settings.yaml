@@ -34,7 +34,7 @@ hmm:
   flicker_threshold: 2
   min_confidence: 0.62           # joint optimum: interval+cs sweeps on indices 2020-2026
   extended_features: true   # true (default): adds vol_ratio, adx_14, dist_sma200 — set false to revert to base only
-  use_vix_features: false    # adds vix_level + vix_zscore_60 cross-asset features (fetches VXX / ^VIX)
+  use_vix_features: true     # adds vix_zscore_60 cross-asset feature (fetches ^VIX daily via yfinance, VXX fallback). Indices: Sharpe 0.263 -> 0.446, MaxDD -31% -> -23%
   features:
   - log_ret_1
   - realized_vol_20

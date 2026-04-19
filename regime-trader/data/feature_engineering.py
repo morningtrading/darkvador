@@ -70,7 +70,11 @@ HMM_EXTENDED_FEATURES: List[str] = [
 # Extended + VIX cross-asset features. Requires a VIX/VXX series to be
 # supplied to build_feature_matrix; otherwise rows are dropped as warm-up.
 HMM_EXTENDED_VIX_FEATURES: List[str] = HMM_EXTENDED_FEATURES + [
-    "vix_level",
+    # vix_level intentionally omitted: non-stationary (VIX levels drift across
+    # regimes), contaminates HMM state definitions. Sub-ablation on indices
+    # showed adding vix_level *with* vix_zscore_60 dropped Sharpe 0.446 -> 0.118.
+    # Only vix_zscore_60 (rolling 60-bar z-score) is retained — it is
+    # stationary-ish and gave +70% Sharpe over EXTENDED baseline on indices.
     "vix_zscore_60",
 ]
 
