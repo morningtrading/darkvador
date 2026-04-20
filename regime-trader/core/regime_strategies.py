@@ -568,6 +568,12 @@ class StrategyOrchestrator:
         self._vol_target_min_mult: float = float(strategy_cfg.get("vol_target_min_mult", 0.25))
         self._vol_target_max_mult: float = float(strategy_cfg.get("vol_target_max_mult", 1.50))
         self._vol_target_window: int    = int(strategy_cfg.get("vol_target_window", 20))
+        # HMM <-> SMA ensemble weight. 1.0 = pure HMM (default/off). 0.0 = pure
+        # SMA-200 equal-weight. Blend: size_i = w*hmm_size + (1-w)*sma_ew_weight.
+        # SMA signal: if market proxy > SMA200, each symbol gets
+        # (low_vol_allocation / n_symbols); else 0. Intended to mix HMM's
+        # regime-awareness with SMA's vol compression.
+        self._sma_blend_weight: float = float(strategy_cfg.get("sma_blend_weight", 1.0))
         self._sma_gate_mid_strategy: BaseStrategy = MidVolCautiousStrategy(
             allocation_above_ema=self._mid_trend_allocation,
             allocation_below_ema=self._mid_notrd_allocation,
@@ -844,6 +850,33 @@ class StrategyOrchestrator:
                         "SMA soft overlay: %s %.2f < SMA200 %.2f → size x%.2f",
                         mkt_sym, close.iloc[-1], sma200, self._sma_soft_mult,
                     )
+
+        # ── HMM <-> SMA ensemble blend (weighted average) ─────────────────────
+        # size_i := w * hmm_size_i + (1-w) * sma_ew_weight  (per-symbol)
+        # where sma_ew_weight = (low_vol_allocation / n_syms) if mkt > SMA200 else 0.
+        # LONG-only blend; does not touch FLAT signals.
+        if 0.0 <= self._sma_blend_weight < 1.0 and len(raw) > 0 and symbols:
+            mkt_sym = symbols[0]
+            mkt_bars = bars.get(mkt_sym)
+            if mkt_bars is not None and len(mkt_bars) >= 200:
+                close = mkt_bars["close"]
+                sma200 = close.iloc[-200:].mean()
+                sma_long = close.iloc[-1] >= sma200
+                n_syms = max(1, len(symbols))
+                sma_ew_weight = (
+                    self._low_vol_allocation / n_syms if sma_long else 0.0
+                )
+                w = self._sma_blend_weight
+                for s in raw:
+                    if s.direction == Direction.LONG:
+                        blended = w * s.position_size_pct + (1.0 - w) * sma_ew_weight
+                        s.position_size_pct = round(max(0.0, blended), 6)
+                logger.info(
+                    "SMA blend: %s %.2f %s SMA200 %.2f → w_hmm=%.2f sma_ew=%.4f",
+                    mkt_sym, close.iloc[-1],
+                    ">=" if sma_long else "<", sma200,
+                    w, sma_ew_weight,
+                )
 
         # ── Rebalance filter ──────────────────────────────────────────────────
         filtered: List[Signal] = []
