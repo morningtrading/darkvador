@@ -28,7 +28,7 @@ hmm:
   - 7
   n_init: 10
   covariance_type: full
-  min_train_bars: 252
+  min_train_bars: 63   # must match backtest.train_window. Previous: 252
   stability_bars: 5              # cs-sweep validated optimum for indices
   flicker_window: 20
   flicker_threshold: 2
