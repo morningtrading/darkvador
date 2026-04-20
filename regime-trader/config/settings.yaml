@@ -39,8 +39,12 @@ hmm:
   features:
   - log_ret_1
   - realized_vol_20
-  blend_exclude:           # symbols excluded from log_ret_1 / realized_vol_20 blending
-  - GLD                    # non-equity assets add cross-asset noise to the HMM feature blend
+  blend_exclude:           # symbols excluded from log_ret_1 / realized_vol_20 feature blending.
+  - GLD                    # HMM features are blended only across US equity ETFs (SPY, QQQ, DIA, IWM).
+  - VNQ                    # Non-equity / international assets (gold, real estate, EM, EAFE) are held
+  - EFA                    # in the portfolio for diversification but excluded from regime calibration:
+  - EEM                    # their vol/return dynamics differ too much from US equity and would add
+  - EWG                    # cross-asset noise that blurs the BULL/BEAR/CRASH regime signal.
 strategy:
   low_vol_allocation: 0.95
   mid_vol_allocation_trend: 0.95

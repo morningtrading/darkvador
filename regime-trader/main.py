@@ -435,7 +435,8 @@ def _print_run_config(
         f"flicker_thresh={hmm_cfg.get('flicker_threshold', 4)}  "
         f"flicker_win={hmm_cfg.get('flicker_window', 20)}  "
         f"min_conf={hmm_cfg.get('min_confidence', 0.55)}",
-        f"  Features    : {', '.join(_hmm_feature_names(hmm_cfg))}",
+        f"  Features    : {', '.join(_hmm_feature_names(hmm_cfg))}  "
+        f"(blend: US equity only — excl. {', '.join(hmm_cfg.get('blend_exclude', ['GLD']))})",
         f"",
         f"  Allocation  : low_vol={strategy_cfg.get('low_vol_allocation', 0.95)}×"
         f"{strategy_cfg.get('low_vol_leverage', 1.25)}x  "
@@ -709,6 +710,10 @@ def _train_hmm(
     lookback_days = max(10, int(n_bars / bars_per_day * 1.4 * 7 / 5) + 5)
 
     # Fetch all symbols so log_ret_1 / realized_vol_20 can be basket-blended.
+    # Blending is restricted to US equity ETFs (blend_exclude removes GLD, VNQ,
+    # EFA, EEM, EWG): non-equity / international assets are held for portfolio
+    # diversification but their regime dynamics differ too much from US equity
+    # to contribute cleanly to HMM calibration.
     # vol_ratio, adx_14, dist_sma200 remain anchored to the reference symbol.
     ref_symbol = symbols[0]
     end   = pd.Timestamp.now(tz="UTC").strftime("%Y-%m-%dT%H:%M:%SZ")
