@@ -2301,7 +2301,10 @@ def run_train_only(config: Dict, args: Optional[argparse.Namespace] = None) -> N
     client = AlpacaClient(paper=paper)
     client.connect_with_retry(max_attempts=3, base_delay=2.0)
 
-    engine = _train_hmm(client, symbols, hmm_cfg, console=console, n_bars=756)
+    # Train on daily bars regardless of live trading timeframe — regimes are
+    # macroeconomic (weeks/months), not intraday. 756 daily bars ≈ 3 years.
+    hmm_cfg_train = {**hmm_cfg, "timeframe": "1Day"}
+    engine = _train_hmm(client, symbols, hmm_cfg_train, console=console, n_bars=756)
     _save_training_log(engine, symbols, hmm_cfg)
     _print(
         f"\n[green]Training complete.[/green]  "
