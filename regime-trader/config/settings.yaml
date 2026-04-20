@@ -28,7 +28,7 @@ hmm:
   - 7
   n_init: 10
   covariance_type: full
-  min_train_bars: 63   # must match backtest.train_window. Previous: 252
+  min_train_bars: 126  # must match backtest.train_window. Previous: 252
   stability_bars: 5              # cs-sweep validated optimum for indices
   flicker_window: 20
   flicker_threshold: 2
@@ -76,9 +76,9 @@ backtest:
   initial_capital: 100000
   slippage_pct: 0.0005
   min_rebalance_interval: 0   # 0 = off; set to N to lock out rebalances for N bars after each one
-  train_window: 63   # IS bars — 3 months daily (~63 bars). Previous: 252 (12m)
-  test_window: 42    # OOS bars — 2 months daily (~42 bars). Previous: 126 (6m)
-  step_size: 42      # Step bars — 2 months daily (~42 bars). Previous: 126 (6m)
+  train_window: 126  # IS bars — 6 months daily. Previous options: 63 (3m), 252 (12m)
+  test_window: 63    # OOS bars — 3 months daily. Previous options: 42 (2m), 126 (6m)
+  step_size: 63      # Step bars — 3 months daily. Previous options: 42 (2m), 126 (6m)
   risk_free_rate: 0.045
   benchmark_symbol: SPY
   commission_per_share: 0.0
