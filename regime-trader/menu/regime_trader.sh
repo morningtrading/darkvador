@@ -122,6 +122,7 @@ print_menu() {
     echo ""
     echo -e "  ${YELLOW}── Source Control ──────────────────────────${RESET}"
     echo -e "  ${MAGENTA}[s]${RESET}  Save & Push      ${DIM}(git commit all changes + push to GitHub)${RESET}"
+    echo -e "  ${MAGENTA}[d]${RESET}  Download (pull)  ${DIM}(git pull --ff-only origin)${RESET}"
     echo ""
     echo -e "  ${YELLOW}── Help ────────────────────────────────────${RESET}"
     echo -e "  ${CYAN}[h]${RESET}  Detailed Help    ${DIM}(all commands + live config values)${RESET}"
@@ -480,6 +481,37 @@ while true; do
                 continue
             fi
             "$TS_BIN" ssh "${SSH_PEER_USER}@${SSH_PEER_NAME}"
+            echo ""
+            read -rp "  Press Enter to return to menu..."
+            ;;
+        d|D)
+            echo ""
+            echo -e "  ${CYAN}>> Download from GitHub (git pull --ff-only)${RESET}"
+            echo -e "  ${DIM}─────────────────────────────────────────${RESET}"
+            echo ""
+            local_branch="$(git -C "$ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null)"
+            echo -e "  Branch: ${CYAN}${local_branch}${RESET}"
+            dirty="$(git -C "$ROOT" status --porcelain)"
+            if [ -n "$dirty" ]; then
+                echo -e "  ${YELLOW}Warning: working tree not clean:${RESET}"
+                git -C "$ROOT" status --short | sed 's/^/    /'
+                echo ""
+                read -rp "  Pull anyway (fast-forward only, may fail)? [y/N]: " yn
+                [[ "$yn" =~ ^[Yy]$ ]] || { echo "  Cancelled."; sleep 1; continue; }
+            fi
+            echo ""
+            echo -e "  ${DIM}git fetch origin${RESET}"
+            git -C "$ROOT" fetch origin
+            echo -e "  ${DIM}git pull --ff-only${RESET}"
+            if git -C "$ROOT" pull --ff-only; then
+                echo ""
+                echo -e "  ${GREEN}Done (fast-forward pull successful)${RESET}"
+            else
+                echo ""
+                echo -e "  ${RED}Pull failed — likely diverged history. Resolve manually:${RESET}"
+                echo -e "  ${DIM}   git log --oneline HEAD..origin/${local_branch}${RESET}"
+                echo -e "  ${DIM}   git rebase origin/${local_branch}   # or merge${RESET}"
+            fi
             echo ""
             read -rp "  Press Enter to return to menu..."
             ;;
