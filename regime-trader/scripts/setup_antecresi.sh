@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────
-#  Bootstrap script for Linux tailnet nodes (antecresi, permanent…)
+#  Bootstrap script for Linux tailnet nodes (residence, permanent…)
 #  Installs: repo clone/pull + `transfert` bash alias
 #  Safe to re-run (idempotent).
 # ─────────────────────────────────────────────────────────────

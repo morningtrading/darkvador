@@ -9,6 +9,25 @@ ROOT="$(dirname "$SCRIPT_DIR")"
 
 cd "$ROOT" || exit 1
 
+# ── OS detection (for cross-machine SSH option) ──────────────
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) OS_KIND="windows" ;;
+    Darwin)               OS_KIND="macos" ;;
+    *)                    OS_KIND="linux" ;;
+esac
+
+# Cross-machine Tailscale SSH targets — override via env if your tailnet
+# uses different names/users.
+if [ "$OS_KIND" = "windows" ]; then
+    # From asimov (Windows) → residence (Linux)
+    SSH_PEER_NAME="${SSH_PEER_NAME:-residence}"
+    SSH_PEER_USER="${SSH_PEER_USER:-titus}"
+else
+    # From residence (Linux) → asimov (Windows)
+    SSH_PEER_NAME="${SSH_PEER_NAME:-asimov}"
+    SSH_PEER_USER="${SSH_PEER_USER:-morningtrading}"
+fi
+
 # ── colours ──────────────────────────────────────────────────
 CYAN='\033[1;36m'
 YELLOW='\033[1;33m'
@@ -96,6 +115,10 @@ print_menu() {
     echo ""
     echo -e "  ${YELLOW}── Asset Groups ────────────────────────────${RESET}"
     echo -e "  ${BLUE}[g]${RESET}  Change Group     ${DIM}(dynamic list from config/asset_groups.yaml)${RESET}"
+    echo ""
+    echo -e "  ${YELLOW}── Remote (Tailscale) ──────────────────────${RESET}"
+    echo -e "  ${BLUE}[t]${RESET}  Transfert        ${DIM}(Tailscale file transfer menu)${RESET}"
+    echo -e "  ${BLUE}[x]${RESET}  SSH → ${SSH_PEER_NAME} ${DIM}(tailscale ssh ${SSH_PEER_USER}@${SSH_PEER_NAME})${RESET}"
     echo ""
     echo -e "  ${YELLOW}── Source Control ──────────────────────────${RESET}"
     echo -e "  ${MAGENTA}[s]${RESET}  Save & Push      ${DIM}(git commit all changes + push to GitHub)${RESET}"
@@ -432,6 +455,33 @@ while true; do
             run_command \
                 "Conf×Stab Grid Sweep — group: $ASSET_GROUP  2020-now" \
                 "py -3.12 main.py cs-sweep --asset-group $ASSET_GROUP --start 2020-01-01"
+            ;;
+        t|T)
+            echo ""
+            echo -e "  ${CYAN}>> Launching Tailscale transfer menu${RESET}"
+            bash "$SCRIPT_DIR/tailscale_transfer.sh"
+            ;;
+        x|X)
+            echo ""
+            echo -e "  ${CYAN}>> SSH → ${SSH_PEER_USER}@${SSH_PEER_NAME}${RESET}"
+            echo -e "  ${DIM}tailscale ssh ${SSH_PEER_USER}@${SSH_PEER_NAME}${RESET}"
+            echo -e "  ${DIM}─────────────────────────────────────────${RESET}"
+            echo ""
+            # Resolve tailscale binary across common paths
+            if command -v tailscale >/dev/null 2>&1; then
+                TS_BIN="tailscale"
+            elif [ -x "/c/Program Files/Tailscale/tailscale.exe" ]; then
+                TS_BIN="/c/Program Files/Tailscale/tailscale.exe"
+            elif [ -x "/usr/bin/tailscale" ]; then
+                TS_BIN="/usr/bin/tailscale"
+            else
+                echo -e "  ${RED}tailscale binary not found in PATH${RESET}"
+                read -rp "  Press Enter to return..."
+                continue
+            fi
+            "$TS_BIN" ssh "${SSH_PEER_USER}@${SSH_PEER_NAME}"
+            echo ""
+            read -rp "  Press Enter to return to menu..."
             ;;
         s|S)
             git_save

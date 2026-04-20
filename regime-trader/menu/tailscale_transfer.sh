@@ -4,7 +4,7 @@
 #  Run from anywhere:  bash menu/tailscale_transfer.sh
 #
 #  Cross-platform: auto-detects OS, tailscale binary, python, sudo.
-#  Same script on asimov (Git Bash), antecresi (Linux), any Mac.
+#  Same script on asimov (Git Bash), residence (Linux), any Mac.
 #
 #  Features
 #   • Live status table of all tailnet peers
