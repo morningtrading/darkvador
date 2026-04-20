@@ -2,7 +2,7 @@
 # Only overrides that differ from config/settings.yaml base.
 
 hmm:
-  n_candidates: [3, 4, 5]        # fewer candidates → faster, less overfit
+  n_candidates: [5]              # fixed 5-state → always CRASH/BEAR/NEUTRAL/BULL/EUPHORIA, reproducible across machines
   stability_bars: 9              # 9 bars (~2 weeks) to confirm regime flip
   flicker_threshold: 5           # tolerate up to 5 changes in 20 bars
   min_confidence: 0.60           # realistic floor for 4-5 state HMM

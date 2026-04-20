@@ -21,9 +21,7 @@ broker:
   data_feed: iex
 hmm:
   n_candidates:
-  - 3
-  - 4
-  - 5
+  - 5            # fixed at 5 → always CRASH/BEAR/NEUTRAL/BULL/EUPHORIA, no BIC variance across machines
   n_init: 10
   covariance_type: full
   min_train_bars: 252  # must match backtest.train_window. Previous: 126, 63

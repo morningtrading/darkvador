@@ -2046,7 +2046,7 @@ def run_backtest(config: Dict, args: argparse.Namespace) -> None:
         console, style="dim",
     )
 
-    # ── Regime bar counts ─────────────────────────────────────────────────────
+    # ── Regime bar counts + transition count ─────────────────────────────────
     if len(result.combined_regimes) > 0:
         _regime_counts = result.combined_regimes.value_counts().sort_index()
         _total_bars = len(result.combined_regimes)
@@ -2055,6 +2055,10 @@ def run_backtest(config: Dict, args: argparse.Namespace) -> None:
             "NEUTRAL",
             "WEAK_BULL", "BULL", "STRONG_BULL", "EUPHORIA",
         ]
+        # count regime changes (consecutive-bar transitions)
+        _reg_series = result.combined_regimes.reset_index(drop=True)
+        _n_changes = int((_reg_series != _reg_series.shift()).sum()) - 1  # -1 for first bar
+        _avg_duration = _total_bars / max(_n_changes + 1, 1)
         # sort by the canonical bear→bull order; unknown labels go at end
         _sorted = sorted(
             _regime_counts.items(),
@@ -2064,7 +2068,11 @@ def run_backtest(config: Dict, args: argparse.Namespace) -> None:
             f"\n    {lbl:<14} {bars:>5} bars  ({bars / _total_bars:>5.1%})"
             for lbl, bars in _sorted
         )
-        _print(f"  Regime counts  :{_regime_lines}", console, style="dim")
+        _print(
+            f"  Regime counts  :{_regime_lines}\n"
+            f"  Regime changes : {_n_changes}  (avg duration {_avg_duration:.1f} bars / regime)",
+            console, style="dim",
+        )
 
     # ── Per-regime P&L attribution ────────────────────────────────────────────
     if result.combined_regime_pnl:
