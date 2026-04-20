@@ -76,9 +76,9 @@ backtest:
   initial_capital: 100000
   slippage_pct: 0.0005
   min_rebalance_interval: 0   # 0 = off; set to N to lock out rebalances for N bars after each one
-  train_window: 252
-  test_window: 126
-  step_size: 126
+  train_window: 63   # IS bars — 3 months daily (~63 bars). Previous: 252 (12m)
+  test_window: 42    # OOS bars — 2 months daily (~42 bars). Previous: 126 (6m)
+  step_size: 42      # Step bars — 2 months daily (~42 bars). Previous: 126 (6m)
   risk_free_rate: 0.045
   benchmark_symbol: SPY
   commission_per_share: 0.0
