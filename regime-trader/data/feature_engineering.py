@@ -498,6 +498,15 @@ class FeatureEngineer:
             if unknown:
                 raise ValueError(f"Unknown features: {unknown}")
             df = df[feature_names]
+            # Drop columns that are entirely NaN (e.g. VIX fetch failure) so
+            # they don't wipe all rows when dropna runs below.
+            all_nan_cols = [c for c in df.columns if df[c].isna().all()]
+            if all_nan_cols:
+                logger.warning(
+                    "Dropping all-NaN feature column(s) %s — likely fetch failure",
+                    all_nan_cols,
+                )
+                df = df.drop(columns=all_nan_cols)
         if dropna:
             n_before = len(df)
             df = df.dropna()

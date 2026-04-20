@@ -777,6 +777,11 @@ def _train_hmm(
             f"need {hmm_cfg.get('min_train_bars', 252)} for HMM training."
         )
 
+    # Intraday bars are noisier — covariance matrices can be near-singular
+    # with the default min_covar=1e-3. Scale up for sub-daily timeframes.
+    _is_intraday = tf not in ("1Day", "1Week")
+    _min_covar = hmm_cfg.get("min_covar", 0.01 if _is_intraday else 1e-3)
+
     engine = HMMEngine(
         n_candidates       = hmm_cfg.get("n_candidates", [3, 4, 5]),
         n_init             = hmm_cfg.get("n_init", 10),
@@ -785,6 +790,7 @@ def _train_hmm(
         flicker_threshold  = hmm_cfg.get("flicker_threshold", 4),
         min_confidence     = hmm_cfg.get("min_confidence", 0.55),
         min_train_bars     = hmm_cfg.get("min_train_bars", 252),
+        min_covar          = _min_covar,
     )
     _n_cands = hmm_cfg.get("n_candidates", [3, 4, 5])
     _n_init  = hmm_cfg.get("n_init", 10)
