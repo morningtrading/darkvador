@@ -36,7 +36,7 @@ for candidate in \
     "$HOME/repos/regime-trader" \
     "$HOME/code/regime-trader" \
     "$HOME/localrepo/regime-trader" \
-    "/c/Users/$USER/localrepo/regime-trader" \
+    "/c/Users/${USER:-$USERNAME}/localrepo/regime-trader" \
     "/opt/regime-trader"
 do
     if [ -d "$candidate" ] && [ -f "$candidate/main.py" ]; then
@@ -104,7 +104,7 @@ if [ -z "$PY_BIN" ]; then
 fi
 
 # ── default remote user by OS ────────────────────────────────
-DEFAULT_REMOTE_USER="$USER"
+DEFAULT_REMOTE_USER="${USER:-$USERNAME}"
 [ "$OS_KIND" = "windows" ] && DEFAULT_REMOTE_USER="morningtrading"
 
 # ── status cache ─────────────────────────────────────────────
