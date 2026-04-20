@@ -22,4 +22,4 @@ risk:
   max_dd_from_peak:   0.08
 
 backtest:
-  slippage_pct: 0.0010           # 10 bps per side — more realistic
+  slippage_pct: 0.0005           # 5 bps per side (standard)

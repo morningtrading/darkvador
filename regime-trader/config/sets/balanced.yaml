@@ -13,5 +13,5 @@ strategy:
   rebalance_threshold:         0.18   # fewer spurious rebalances
 
 backtest:
-  slippage_pct: 0.0010           # 10 bps per side
+  slippage_pct: 0.0005           # 5 bps per side (standard — aligns with measured RTH half-spreads on liquid ETFs)
   min_rebalance_interval: 5      # no rebalance within 5 bars (~1 week) of last one
