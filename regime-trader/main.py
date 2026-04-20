@@ -462,6 +462,9 @@ def _print_comparison_table(
     rand_metrics: Optional[Dict],
     console=None,
     n_symbols: int = 1,
+    sma_long: int = 200,
+    ema_fast: int = 9,
+    ema_slow: int = 45,
 ) -> None:
     """Print a side-by-side benchmark comparison table."""
     rows = [
@@ -487,8 +490,10 @@ def _print_comparison_table(
             return str(v)
 
     bnh_label      = "Buy & Hold (EW)" if n_symbols > 1 else "Buy & Hold"
-    sma_label      = "SMA-200 (EW)"    if n_symbols > 1 else "SMA-200 Trend"
-    ema_cross_label = "EMA 9/45 (EW)"  if n_symbols > 1 else "EMA 9/45 Cross"
+    sma_label      = (f"SMA-{sma_long} (EW)"   if n_symbols > 1
+                      else f"SMA-{sma_long} Trend")
+    ema_cross_label = (f"EMA {ema_fast}/{ema_slow} (EW)" if n_symbols > 1
+                       else f"EMA {ema_fast}/{ema_slow} Cross")
 
     if console:
         try:
@@ -517,7 +522,8 @@ def _print_comparison_table(
             pass
 
     print("\nBENCHMARK COMPARISON")
-    print(f"{'Metric':<20} {'Strategy':>12} {'BnH':>12} {'SMA-200':>12} {'EMA 9/45':>12} {'Random':>12}")
+    print(f"{'Metric':<20} {'Strategy':>12} {'BnH':>12} "
+          f"{f'SMA-{sma_long}':>12} {f'EMA {ema_fast}/{ema_slow}':>12} {'Random':>12}")
     print("-" * 82)
     for label, key, fmt in rows:
         print(
@@ -2023,7 +2029,11 @@ def run_backtest(config: Dict, args: argparse.Namespace) -> None:
 
         # Same slippage applied to HMM strategy AND all benchmarks for
         # apples-to-apples comparison.
-        _slip = float(config.get("backtest", {}).get("slippage_pct", 0.0005))
+        _bt_cfg = config.get("backtest", {}) or {}
+        _slip = float(_bt_cfg.get("slippage_pct", 0.0005))
+        _sma_long = int(_bt_cfg.get("sma_long", 200))
+        _ema_fast = int(_bt_cfg.get("ema_fast", 9))
+        _ema_slow = int(_bt_cfg.get("ema_slow", 45))
 
         multi = len(symbols) > 1
         if multi:
@@ -2034,16 +2044,16 @@ def run_backtest(config: Dict, args: argparse.Namespace) -> None:
                 {s: prices[s] for s in avail_syms}
             ).reindex(result.combined_equity.index).ffill().dropna(how="all")
             bnh_equity      = pa.compute_benchmark_bnh_multi(price_df, initial_capital, slippage_pct=_slip)
-            sma_equity      = pa.compute_benchmark_sma_multi(price_df, 200, initial_capital, slippage_pct=_slip)
-            ema_cross_equity = pa.compute_benchmark_ema_cross_multi(price_df, 9, 45, initial_capital, slippage_pct=_slip)
+            sma_equity      = pa.compute_benchmark_sma_multi(price_df, _sma_long, initial_capital, slippage_pct=_slip)
+            ema_cross_equity = pa.compute_benchmark_ema_cross_multi(price_df, _ema_fast, _ema_slow, initial_capital, slippage_pct=_slip)
             rand_mean, _ = pa.compute_random_allocation_benchmark_multi(
                 price_df, allocations=[0.60, 0.95], n_seeds=100,
                 initial_capital=initial_capital, slippage_pct=_slip,
             )
         else:
             bnh_equity       = pa.compute_benchmark_bnh(bm_prices, initial_capital, slippage_pct=_slip)
-            sma_equity       = pa.compute_benchmark_sma(bm_prices, 200, initial_capital, slippage_pct=_slip)
-            ema_cross_equity = pa.compute_benchmark_ema_cross(bm_prices, 9, 45, initial_capital, slippage_pct=_slip)
+            sma_equity       = pa.compute_benchmark_sma(bm_prices, _sma_long, initial_capital, slippage_pct=_slip)
+            ema_cross_equity = pa.compute_benchmark_ema_cross(bm_prices, _ema_fast, _ema_slow, initial_capital, slippage_pct=_slip)
             underlying_ret     = bm_prices.pct_change().dropna()
             underlying_aligned = underlying_ret.reindex(
                 result.combined_returns.index
@@ -2077,6 +2087,7 @@ def run_backtest(config: Dict, args: argparse.Namespace) -> None:
         _print_comparison_table(
             report, bnh_rpt, sma_rpt, ema_cross_rpt, rand_rpt_metrics, console,
             n_symbols=len(symbols),
+            sma_long=_sma_long, ema_fast=_ema_fast, ema_slow=_ema_slow,
         )
 
     if getattr(args, "stress_test", False):

@@ -81,6 +81,10 @@ backtest:
   benchmark_symbol: SPY
   commission_per_share: 0.0
   min_commission: 0.0
+  # Benchmark overlay parameters (also used by strategy SMA gates)
+  sma_long: 200        # SMA window for trend benchmark / gate (daily bars on indices; scale for 5Min)
+  ema_fast: 9          # EMA crossover fast period
+  ema_slow: 45         # EMA crossover slow period
 monitoring:
   dashboard_refresh_seconds: 5
   alert_rate_limit_minutes: 15
