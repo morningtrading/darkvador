@@ -82,7 +82,7 @@ backtest:
   min_rebalance_interval: 0   # 0 = off; set to N to lock out rebalances for N bars after each one
   train_window: 252  # IS bars — 12 months daily. Previous options: 63 (3m), 126 (6m)
   test_window: 63    # OOS bars — 3 months daily. Previous options: 42 (2m), 126 (6m)
-  step_size: 126     # Step bars — 6 months daily. Previous options: 42 (2m), 63 (3m)
+  step_size: 63      # Step bars — must be ≤ test_window for contiguous OOS coverage. Previous: 126 (created 63-bar gaps, missing bull runs)
   risk_free_rate: 0.045
   benchmark_symbol: SPY
   commission_per_share: 0.0
