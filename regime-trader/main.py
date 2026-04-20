@@ -803,6 +803,17 @@ def _train_hmm(
         engine.fit(features_clean.values)
     engine._n_train_bars = len(features_clean)   # stored for logging
 
+    # Attach in-sample regime sequence for post-training stats display
+    try:
+        _raw_states = engine._model.predict(features_clean.values)
+        engine._training_regimes = pd.Series(
+            [engine.get_state_label(s) for s in _raw_states],
+            index=features_clean.index,
+            name="regime",
+        )
+    except Exception:
+        engine._training_regimes = None
+
     with _stage(5, f"Saving model → {_MODEL_PATH.name}"):
         engine.save(str(_MODEL_PATH))
 
@@ -2298,6 +2309,56 @@ def run_train_only(config: Dict, args: Optional[argparse.Namespace] = None) -> N
         f"saved -> {_MODEL_PATH}",
         console,
     )
+
+    # ── Detailed regime statistics ────────────────────────────────────────
+    regimes: Optional[pd.Series] = getattr(engine, "_training_regimes", None)
+    if regimes is not None and len(regimes) > 0:
+        _print("\n[bold cyan]Regime Breakdown (in-sample)[/bold cyan]", console)
+        _print(f"  {'Regime':<16} {'Bars':>6} {'%Time':>7} {'AvgDur':>8} {'MinDur':>7} {'MaxDur':>7}", console)
+        _print("  " + "─" * 57, console)
+
+        all_labels = list(dict.fromkeys(regimes))  # preserve order of first appearance
+        ordered_labels = sorted(set(regimes), key=lambda x: list(regimes).index(x))
+
+        # Compute run-length encoding for durations
+        _runs: Dict[str, list] = {}
+        cur_label, cur_len = regimes.iloc[0], 1
+        for lbl in regimes.iloc[1:]:
+            if lbl == cur_label:
+                cur_len += 1
+            else:
+                _runs.setdefault(cur_label, []).append(cur_len)
+                cur_label, cur_len = lbl, 1
+        _runs.setdefault(cur_label, []).append(cur_len)
+
+        total_bars = len(regimes)
+        for lbl in sorted(set(regimes)):
+            runs = _runs.get(lbl, [1])
+            count = sum(runs)
+            pct   = count / total_bars * 100
+            avg_d = sum(runs) / len(runs)
+            _print(
+                f"  {lbl:<16} {count:>6}  {pct:>6.1f}%  {avg_d:>7.1f}  {min(runs):>6}  {max(runs):>6}",
+                console,
+            )
+
+        n_changes = int((regimes != regimes.shift()).sum()) - 1
+        _print("  " + "─" * 57, console)
+        _print(f"  Total regime changes : {n_changes}", console)
+        _print(f"  Avg bars per regime  : {total_bars / max(n_changes + 1, 1):.1f}", console)
+        _print(f"  Current regime       : [bold]{regimes.iloc[-1]}[/bold]  (last bar: {regimes.index[-1]})", console)
+
+        # Transition matrix
+        _print("\n[bold cyan]Transition Matrix (counts)[/bold cyan]", console)
+        labels_sorted = sorted(set(regimes))
+        header = f"  {'':>14} " + " ".join(f"{l[:8]:>9}" for l in labels_sorted)
+        _print(header, console)
+        for from_l in labels_sorted:
+            row = ""
+            for to_l in labels_sorted:
+                mask = (regimes == from_l) & (regimes.shift(-1) == to_l)
+                row += f" {int(mask.sum()):>9}"
+            _print(f"  {from_l[:14]:<14}{row}", console)
 
     client.disconnect()
 
