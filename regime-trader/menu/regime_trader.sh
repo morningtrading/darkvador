@@ -87,8 +87,55 @@ get_active_set() {
     fi
 }
 
+# ── YAML single-value updater (preserves comments) ───────────
+# Usage: yaml_set <yaml_key> <new_value>
+# Replaces the first matching "  key: <anything>" line in settings.yaml.
+# Handles: strings, numbers, booleans, null/empty.
+yaml_set() {
+    local key="$1"
+    local val="$2"
+    $PYTHON - "$key" "$val" <<'PYEOF'
+import sys, re, pathlib
+key, val = sys.argv[1], sys.argv[2]
+path = pathlib.Path("config/settings.yaml")
+text = path.read_text(encoding="utf-8")
+# Match "  key: anything  # optional comment"
+pattern = rf'^(\s*{re.escape(key)}\s*:)[^\n]*(.*?)$'
+def replacer(m):
+    inline_comment = ""
+    orig_rest = m.group(0)[len(m.group(1)):]
+    cm = re.search(r'(#.*)$', orig_rest)
+    if cm:
+        inline_comment = "  " + cm.group(1)
+    return f"{m.group(1)} {val}{inline_comment}"
+new_text, n = re.subn(pattern, replacer, text, count=1, flags=re.MULTILINE)
+if n == 0:
+    print(f"  WARNING: key '{key}' not found in settings.yaml", file=sys.stderr)
+else:
+    path.write_text(new_text, encoding="utf-8")
+    print(f"  OK: {key} = {val}")
+PYEOF
+}
+
+# ── Read a single HMM setting from settings.yaml ──────────────
+hmm_get() {
+    local key="$1"
+    $PYTHON -c "
+import yaml, sys
+try:
+    cfg = yaml.safe_load(open('config/settings.yaml'))
+    v = cfg.get('hmm', {}).get('$key', '')
+    print('' if v is None else v)
+except Exception as e:
+    print('?')
+" 2>/dev/null
+}
+
 print_header() {
     clear
+    local proxy
+    proxy="$(hmm_get regime_proxy)"
+    [ -z "$proxy" ] && proxy="basket blend"
     echo -e "${CYAN}"
     echo "  ╔══════════════════════════════════════╗"
     echo "  ║         REGIME  TRADER               ║"
@@ -98,10 +145,14 @@ print_header() {
     echo -e "  ${DIM}Working directory: $ROOT${RESET}"
     echo -e "  ${YELLOW}Active group : ${CYAN}${ASSET_GROUP}${RESET}  ${DIM}(change with g)${RESET}"
     echo -e "  ${YELLOW}Config set   : ${MAGENTA}$(get_active_set)${RESET}  ${DIM}(change with c)${RESET}"
+    echo -e "  ${YELLOW}Regime proxy : ${MAGENTA}${proxy}${RESET}  ${DIM}(change with m)${RESET}"
     echo ""
 }
 
 print_menu() {
+    echo -e "  ${YELLOW}── HMM Regime Detector ─────────────────────${RESET}"
+    echo -e "  ${MAGENTA}[m]${RESET}  Regime Settings  ${DIM}(proxy symbol, states, confidence, features…)${RESET}"
+    echo ""
     echo -e "  ${YELLOW}── Trading ─────────────────────────────────${RESET}"
     echo -e "  ${GREEN}[1]${RESET}  Train HMM        ${DIM}(fetch latest bars, fit model, save)${RESET}"
     echo -e "  ${GREEN}[2]${RESET}  Dry Run          ${DIM}(full pipeline — no orders placed)${RESET}"
@@ -362,6 +413,159 @@ select_set() {
     sleep 1
 }
 
+select_regime_settings() {
+    while true; do
+        clear
+        # ── Read current values ──────────────────────────────────
+        local proxy n_cand min_conf stab ext_feat vix_feat cred_feat feats
+        proxy="$(hmm_get regime_proxy)"
+        n_cand="$(hmm_get n_candidates)"
+        min_conf="$(hmm_get min_confidence)"
+        stab="$(hmm_get stability_bars)"
+        ext_feat="$(hmm_get extended_features)"
+        vix_feat="$(hmm_get use_vix_features)"
+        cred_feat="$(hmm_get use_credit_spread_features)"
+        feats="$(hmm_get features)"
+
+        local proxy_display
+        [ -z "$proxy" ] && proxy_display="${DIM}(basket blend — all equity symbols)${RESET}" \
+                        || proxy_display="${MAGENTA}${proxy}${RESET}"
+
+        echo -e "${CYAN}"
+        echo "  ╔══════════════════════════════════════════════════════╗"
+        echo "  ║        HMM REGIME DETECTOR SETTINGS                  ║"
+        echo "  ╚══════════════════════════════════════════════════════╝"
+        echo -e "${RESET}"
+        echo -e "  ${DIM}Source: config/settings.yaml → [hmm]${RESET}"
+        echo ""
+        echo -e "  ${YELLOW}── Regime Training Proxy ───────────────────────────────${RESET}"
+        echo -e "  ${GREEN}[1]${RESET}  regime_proxy        = $proxy_display"
+        echo -e "       ${DIM}Which symbol's bars are used to train the HMM.${RESET}"
+        echo -e "       ${DIM}Blank = cross-symbol basket blend (default).${RESET}"
+        echo -e "       ${DIM}Set to e.g. SPY or QQQ to anchor on a single proxy.${RESET}"
+        echo ""
+        echo -e "  ${YELLOW}── State / Filter Parameters ───────────────────────────${RESET}"
+        echo -e "  ${GREEN}[2]${RESET}  n_candidates        = ${MAGENTA}${n_cand}${RESET}"
+        echo -e "       ${DIM}List of state counts tested per fold (e.g. [3,4,5,6]).${RESET}"
+        echo -e "  ${GREEN}[3]${RESET}  min_confidence      = ${MAGENTA}${min_conf}${RESET}"
+        echo -e "       ${DIM}Min posterior probability to trust a regime call (0–1).${RESET}"
+        echo -e "  ${GREEN}[4]${RESET}  stability_bars      = ${MAGENTA}${stab}${RESET}"
+        echo -e "       ${DIM}Consecutive bars a regime must persist before acting.${RESET}"
+        echo ""
+        echo -e "  ${YELLOW}── Feature Flags ───────────────────────────────────────${RESET}"
+        echo -e "  ${GREEN}[5]${RESET}  extended_features   = ${MAGENTA}${ext_feat}${RESET}"
+        echo -e "       ${DIM}Adds vol_ratio, adx_14, dist_sma200 to HMM input.${RESET}"
+        echo -e "  ${GREEN}[6]${RESET}  use_vix_features    = ${MAGENTA}${vix_feat}${RESET}"
+        echo -e "       ${DIM}Adds vix_zscore_60 cross-asset feature (via yfinance).${RESET}"
+        echo -e "  ${GREEN}[7]${RESET}  credit_spread_feat  = ${MAGENTA}${cred_feat}${RESET}"
+        echo -e "       ${DIM}Adds credit_spread_z60 = z-score(HYG/LQD ratio).${RESET}"
+        echo ""
+        echo -e "  ${DIM}Base features always active: ${feats}${RESET}"
+        echo ""
+        echo -e "  ${RED}[b]${RESET}  Back to main menu"
+        echo ""
+        echo -e "  ${DIM}─────────────────────────────────────────────────────${RESET}"
+        read -rp "  Your choice: " rchoice
+
+        case "$rchoice" in
+        1)
+            echo ""
+            echo -e "  ${YELLOW}Current regime_proxy: ${MAGENTA}${proxy:-<blank>}${RESET}"
+            echo -e "  ${DIM}Enter a symbol (e.g. QQQ, SPY) or leave blank for basket blend:${RESET}"
+            read -rp "  New value: " new_proxy
+            if [ -z "$new_proxy" ]; then
+                yaml_set "regime_proxy" ""
+            else
+                new_proxy="${new_proxy^^}"  # uppercase
+                yaml_set "regime_proxy" "$new_proxy"
+            fi
+            sleep 1
+            ;;
+        2)
+            echo ""
+            echo -e "  ${YELLOW}Current n_candidates: ${MAGENTA}${n_cand}${RESET}"
+            echo -e "  ${DIM}Enter as YAML list, e.g:  [3, 4, 5, 6]${RESET}"
+            read -rp "  New value: " new_ncand
+            [ -n "$new_ncand" ] && yaml_set "n_candidates" "" && \
+                $PYTHON - "$new_ncand" <<'PYEOF2'
+import sys, re, pathlib
+val = sys.argv[1].strip()
+path = pathlib.Path("config/settings.yaml")
+text = path.read_text(encoding="utf-8")
+# Replace the n_candidates block (may be multiline list)
+# Find key and replace until next non-indented-list line
+pattern = r'(  n_candidates:)(\n(  - \S+\n)*)+'
+def block_rep(m):
+    items = [x.strip() for x in val.strip('[]').split(',')]
+    lines = '\n'.join(f'  - {i.strip()}' for i in items)
+    return f"  n_candidates:\n{lines}\n"
+new_text, n = re.subn(pattern, block_rep, text, count=1)
+if n:
+    path.write_text(new_text, encoding="utf-8")
+    print(f"  OK: n_candidates = {val}")
+else:
+    print("  WARNING: could not update n_candidates block", file=sys.stderr)
+PYEOF2
+            sleep 1
+            ;;
+        3)
+            echo ""
+            echo -e "  ${YELLOW}Current min_confidence: ${MAGENTA}${min_conf}${RESET}"
+            read -rp "  New value (0.0–1.0): " new_conf
+            [ -n "$new_conf" ] && yaml_set "min_confidence" "$new_conf"
+            sleep 1
+            ;;
+        4)
+            echo ""
+            echo -e "  ${YELLOW}Current stability_bars: ${MAGENTA}${stab}${RESET}"
+            read -rp "  New value (integer): " new_stab
+            [ -n "$new_stab" ] && yaml_set "stability_bars" "$new_stab"
+            sleep 1
+            ;;
+        5)
+            echo ""
+            if [ "$ext_feat" = "True" ] || [ "$ext_feat" = "true" ]; then
+                yaml_set "extended_features" "false"
+                echo -e "  ${YELLOW}extended_features → false${RESET}"
+            else
+                yaml_set "extended_features" "true"
+                echo -e "  ${GREEN}extended_features → true${RESET}"
+            fi
+            sleep 1
+            ;;
+        6)
+            echo ""
+            if [ "$vix_feat" = "True" ] || [ "$vix_feat" = "true" ]; then
+                yaml_set "use_vix_features" "false"
+                echo -e "  ${YELLOW}use_vix_features → false${RESET}"
+            else
+                yaml_set "use_vix_features" "true"
+                echo -e "  ${GREEN}use_vix_features → true${RESET}"
+            fi
+            sleep 1
+            ;;
+        7)
+            echo ""
+            if [ "$cred_feat" = "True" ] || [ "$cred_feat" = "true" ]; then
+                yaml_set "use_credit_spread_features" "false"
+                echo -e "  ${YELLOW}use_credit_spread_features → false${RESET}"
+            else
+                yaml_set "use_credit_spread_features" "true"
+                echo -e "  ${GREEN}use_credit_spread_features → true${RESET}"
+            fi
+            sleep 1
+            ;;
+        b|B)
+            return
+            ;;
+        *)
+            echo -e "  ${RED}Invalid option — try again.${RESET}"
+            sleep 1
+            ;;
+        esac
+    done
+}
+
 select_group() {
     load_groups
     echo ""
@@ -529,6 +733,9 @@ while true; do
             git_save
             echo ""
             read -rp "  Press Enter to return to menu..."
+            ;;
+        m|M)
+            select_regime_settings
             ;;
         c|C)
             select_set

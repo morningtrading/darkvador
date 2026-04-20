@@ -303,7 +303,8 @@ class WalkForwardBacktester:
         ohlcv: Dict[str, pd.DataFrame] = {s: _ohlcv_from_close(prices[s]) for s in syms}
 
         # ── Compute features on the full price history (market symbol = first) ─
-        market_sym = syms[0]
+        _proxy = hmm_cfg.get("regime_proxy") or None
+        market_sym = (_proxy if _proxy and _proxy in ohlcv else None) or syms[0]
         fe = FeatureEngineer(
             zscore_window=self.zscore_window,
             sma_long=self.sma_long,
@@ -324,11 +325,17 @@ class WalkForwardBacktester:
         # HMM sees a basket-level return/vol signal rather than a single proxy.
         # vol_ratio, adx_14, dist_sma200 remain market_sym-anchored (trend info).
         # Non-equity assets (GLD, TLT, USO …) are excluded via hmm_cfg.blend_exclude.
+        # If regime_proxy is set, skip blending entirely (proxy already is the sole source).
+        _blend_exclude = (
+            [s for s in syms if s != market_sym]   # exclude everything but proxy → no blend
+            if _proxy else
+            hmm_cfg.get("blend_exclude", [])
+        )
         full_features_raw = blend_cross_symbol_features(
             full_features_raw,
             {s: ohlcv[s] for s in syms if s in ohlcv},
             feature_engineer=fe,
-            blend_exclude=hmm_cfg.get("blend_exclude", []),
+            blend_exclude=_blend_exclude,
             min_bars=0,
         )
 
@@ -960,7 +967,8 @@ class WalkForwardBacktester:
 
         ohlcv: Dict = {s: _ohlcv_from_close(prices[s]) for s in syms}
 
-        market_sym = syms[0]
+        _proxy = hmm_cfg.get("regime_proxy") or None
+        market_sym = (_proxy if _proxy and _proxy in ohlcv else None) or syms[0]
         fe = FeatureEngineer(
             zscore_window=self.zscore_window,
             sma_long=self.sma_long,
@@ -980,11 +988,17 @@ class WalkForwardBacktester:
         # Blend log_ret_1 and realized_vol_20 across all symbols so the HMM sees
         # a basket-level return/vol signal rather than a single proxy.
         # Non-equity assets excluded via hmm_cfg.blend_exclude (see run()).
+        # If regime_proxy is set, skip blending entirely (proxy already is the sole source).
+        _blend_exclude = (
+            [s for s in syms if s != market_sym]   # exclude everything but proxy → no blend
+            if _proxy else
+            hmm_cfg.get("blend_exclude", [])
+        )
         full_features_raw = blend_cross_symbol_features(
             full_features_raw,
             {s: ohlcv[s] for s in syms if s in ohlcv},
             feature_engineer=fe,
-            blend_exclude=hmm_cfg.get("blend_exclude", []),
+            blend_exclude=_blend_exclude,
             min_bars=0,
         )
 

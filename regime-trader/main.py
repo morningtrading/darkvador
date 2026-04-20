@@ -715,7 +715,8 @@ def _train_hmm(
     # diversification but their regime dynamics differ too much from US equity
     # to contribute cleanly to HMM calibration.
     # vol_ratio, adx_14, dist_sma200 remain anchored to the reference symbol.
-    ref_symbol = symbols[0]
+    _proxy = hmm_cfg.get("regime_proxy") or None
+    ref_symbol = (_proxy if _proxy and _proxy in symbols else None) or symbols[0]
     end   = pd.Timestamp.now(tz="UTC").strftime("%Y-%m-%dT%H:%M:%SZ")
     start = (pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=lookback_days)).strftime(
         "%Y-%m-%dT%H:%M:%SZ"
@@ -768,11 +769,16 @@ def _train_hmm(
         except Exception:
             continue
     with _stage(3, f"Blending features across {len(_per_symbol_bars)} symbols"):
+        _blend_excl_train = (
+            [s for s in symbols if s != ref_symbol]
+            if hmm_cfg.get("regime_proxy") else
+            hmm_cfg.get("blend_exclude", [])
+        )
         features_clean = _blend_cross_symbol_features(
             features_clean,
             _per_symbol_bars,
             feature_engineer=fe,
-            blend_exclude=hmm_cfg.get("blend_exclude", []),
+            blend_exclude=_blend_excl_train,
             min_bars=0,
         )
 
@@ -1183,7 +1189,8 @@ class TradingSession:
         _startup_stable   = False
         _startup_notes    = ["Awaiting first live bar"]
         try:
-            _ref_sym   = symbols[0]
+            _proxy_live = hmm_cfg.get("regime_proxy") or None
+            _ref_sym   = (_proxy_live if _proxy_live and _proxy_live in symbols else None) or symbols[0]
             _tf        = broker_cfg.get("timeframe", "5Min")
             _pred_bars = _fetch_live_bars(self.client, symbols, _tf, n_bars=300)
             _ref_df    = _pred_bars.get(_ref_sym)
@@ -1213,7 +1220,11 @@ class TradingSession:
                     _feat_df,
                     _sp_bars,
                     feature_engineer=_fe,
-                    blend_exclude=hmm_cfg.get("blend_exclude", []),
+                    blend_exclude=(
+                        [s for s in symbols if s != _ref_sym]
+                        if _proxy_live else
+                        hmm_cfg.get("blend_exclude", [])
+                    ),
                     min_bars=10,
                 )
                 if len(_feat_df) < 10:
@@ -1369,7 +1380,8 @@ class TradingSession:
                 continue
 
             # ---- 2. Compute features (using benchmark symbol) ----------------
-            ref_sym = symbols[0]
+            _proxy_loop = hmm_cfg.get("regime_proxy") or None
+            ref_sym = (_proxy_loop if _proxy_loop and _proxy_loop in symbols else None) or symbols[0]
             ref_bars = bars_by_symbol.get(ref_sym)
             if ref_bars is None or len(ref_bars) < 60:
                 logger.warning("Insufficient bars for %s -- skipping", ref_sym)
@@ -1396,7 +1408,11 @@ class TradingSession:
                     features_clean,
                     _lp_bars,
                     feature_engineer=fe,
-                    blend_exclude=hmm_cfg.get("blend_exclude", []),
+                    blend_exclude=(
+                        [s for s in symbols if s != ref_sym]
+                        if _proxy_loop else
+                        hmm_cfg.get("blend_exclude", [])
+                    ),
                     min_bars=10,
                 )
                 if len(features_clean) < 10:
