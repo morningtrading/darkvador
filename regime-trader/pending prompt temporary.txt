@@ -1,0 +1,101 @@
+Ajout de deux nouvelles features dans feature_engineering.py.
+Deux features seulement, rien d'autre.
+
+SCOPE : uniquement feature_engineering.py. Ne pas toucher
+hmm_engine.py, regime_strategies.py, backtester.py,
+ou tout autre fichier. Ne pas modifier les features existantes.
+
+─────────────────────────────────────────
+ÉTAPE 1 — Audit avant tout changement
+─────────────────────────────────────────
+Avant d'écrire quoi que ce soit :
+
+1. Montre-moi la signature exacte de build_feature_matrix()
+   et la liste complète des features actuellement calculées,
+   avec leurs noms de colonnes en sortie.
+
+2. Confirme que le DataFrame d'entrée contient bien :
+   open, high, low, close, volume avec un DatetimeIndex.
+   Si ce n'est pas le cas, dis-le moi avant de continuer.
+
+3. Identifie où dans le fichier les features existantes
+   sont calculées (numéros de lignes) pour savoir où
+   insérer les nouvelles sans casser l'ordre.
+
+Attends ma confirmation avant de passer à l'étape 2.
+
+─────────────────────────────────────────
+ÉTAPE 2 — Implémentation (après confirmation)
+─────────────────────────────────────────
+Ajoute exactement ces deux features, dans cet ordre :
+
+FEATURE 1 — vwap_distance
+  Définition :
+    vwap = cumsum(close * volume) / cumsum(volume)
+    calculé sur une fenêtre roulante de 20 barres
+    (pas un VWAP ancré sur la journée — on n'a pas
+    garantie d'avoir l'open de session dans toutes
+    les données)
+
+    vwap_distance = (close - vwap) / atr_14
+    où atr_14 = moyenne mobile 14 barres de (high - low)
+
+  Propriétés attendues :
+    - Causal : fenêtre roulante uniquement, pas de lookahead
+    - Unité : multiple d'ATR (dimensionless)
+    - Valeurs typiques : entre -3.0 et +3.0
+    - NaN : les 20 premières barres (warmup roulant)
+
+FEATURE 2 — volume_clock
+  Définition :
+    Pour US equities (session 09:30 → 16:00 = 390 minutes) :
+      minutes_since_open = (bar_time.hour * 60
+                           + bar_time.minute) - 570
+      volume_clock = minutes_since_open / 390
+      clippé entre 0.0 et 1.0
+
+    570 = 9h30 en minutes depuis minuit
+
+    Si le DatetimeIndex est timezone-aware (UTC ou autre),
+    convertir en America/New_York avant le calcul.
+
+    Si les données ne sont pas sur une session US
+    (forex, crypto 24/7), mettre volume_clock = 0.5
+    pour toutes les barres (neutre, pas de distorsion).
+
+  Propriétés attendues :
+    - Aucun NaN (valeur définie pour chaque barre)
+    - Valeurs : [0.0, 1.0]
+    - 0.0 = ouverture session, 1.0 = clôture session
+
+─────────────────────────────────────────
+CONTRAINTES D'IMPLÉMENTATION
+─────────────────────────────────────────
+1. Les deux features doivent être ajoutées à la liste
+   retournée par build_feature_matrix() sous les noms
+   exacts : 'vwap_distance' et 'volume_clock'
+
+2. Elles doivent être OPTIONNELLES — activées uniquement
+   si leurs noms sont présents dans le paramètre
+   feature_names passé à build_feature_matrix().
+   Ne pas les forcer pour tous les appels existants.
+
+3. Ne pas modifier le comportement des features existantes
+   (log_ret_1, realized_vol_20, vol_ratio, adx_14,
+   dist_sma200, trend_slope, volume_norm, volume_trend).
+
+4. Ajouter un commentaire d'une ligne au-dessus de
+   chaque nouvelle feature expliquant ce qu'elle mesure.
+
+5. Montre uniquement les diffs, pas le fichier complet.
+
+─────────────────────────────────────────
+VALIDATION ATTENDUE
+─────────────────────────────────────────
+Après les diffs, montre-moi un exemple de sortie
+attendue pour 5 barres fictives :
+  - vwap_distance : valeurs numériques plausibles
+  - volume_clock  : valeurs entre 0.0 et 1.0
+
+Ne pas lancer de backtest. Ne pas modifier la config.
+Ce sera fait séparément une fois les features validées.

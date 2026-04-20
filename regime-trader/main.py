@@ -549,33 +549,60 @@ _TF_MINUTES: Dict[str, int] = {
     "1Week": 1950,
 }
 
-# NYSE open/close in UTC
-_MARKET_OPEN_UTC  = dt.time(14, 30)   # 09:30 ET = 14:30 UTC
-_MARKET_CLOSE_UTC = dt.time(21,  0)   # 16:00 ET = 21:00 UTC
+# NYSE open/close in UTC — static fallback only. The live path resolves
+# market hours via pandas_market_calendars, which correctly handles DST
+# transitions (EST close = 21:00 UTC, EDT close = 20:00 UTC) and the
+# full NYSE holiday schedule (Thanksgiving, Christmas, early-close days,
+# etc.). If the library is unavailable the old naive behavior kicks in.
+_MARKET_OPEN_UTC  = dt.time(14, 30)   # 09:30 EST ≈ 14:30 UTC (fallback)
+_MARKET_CLOSE_UTC = dt.time(21,  0)   # 16:00 EST ≈ 21:00 UTC (fallback)
+
+try:
+    import pandas_market_calendars as _mcal  # type: ignore
+    _NYSE_CAL = _mcal.get_calendar("NYSE")
+except Exception:  # pragma: no cover — degrade to naive fallback
+    _NYSE_CAL = None
+
+
+def _next_trading_day_close_utc(now: dt.datetime) -> dt.datetime:
+    """Return the next NYSE session close ≥ now (UTC, honors DST + holidays)."""
+    if _NYSE_CAL is not None:
+        # Look ahead 10 calendar days to guarantee we catch the next session
+        # even around Christmas/Thanksgiving clusters.
+        sched = _NYSE_CAL.schedule(
+            start_date=(now - dt.timedelta(days=1)).date(),
+            end_date=(now + dt.timedelta(days=10)).date(),
+        )
+        for _, row in sched.iterrows():
+            close_utc = row["market_close"].to_pydatetime()
+            if close_utc.tzinfo is None:
+                close_utc = close_utc.replace(tzinfo=dt.timezone.utc)
+            if close_utc > now:
+                return close_utc
+    # Fallback: 21:00 UTC, skip weekends (no holiday awareness)
+    today_close = now.replace(
+        hour=_MARKET_CLOSE_UTC.hour,
+        minute=_MARKET_CLOSE_UTC.minute,
+        second=0, microsecond=0,
+    )
+    if now >= today_close:
+        today_close += dt.timedelta(days=1)
+    while today_close.weekday() >= 5:
+        today_close += dt.timedelta(days=1)
+    return today_close
 
 
 def _next_bar_close_utc(timeframe: str) -> dt.datetime:
     """
     Return the next bar-close UTC datetime for the given timeframe.
-    For daily bars this is today's (or next trading day's) market close.
+    For daily bars this is the next NYSE session close (DST + holidays aware).
     For intraday bars this is the next N-minute boundary after now.
     """
     now = dt.datetime.now(dt.timezone.utc)
     minutes = _TF_MINUTES.get(timeframe, 5)
 
     if timeframe in ("1Day", "1Week"):
-        # Align to next market close (21:00 UTC)
-        today_close = now.replace(
-            hour=_MARKET_CLOSE_UTC.hour,
-            minute=_MARKET_CLOSE_UTC.minute,
-            second=0, microsecond=0,
-        )
-        if now >= today_close:
-            today_close += dt.timedelta(days=1)
-        # Skip to Monday if landing on weekend
-        while today_close.weekday() >= 5:
-            today_close += dt.timedelta(days=1)
-        return today_close
+        return _next_trading_day_close_utc(now)
 
     # Round up to next N-minute boundary
     epoch = dt.datetime(2000, 1, 1, tzinfo=dt.timezone.utc)
@@ -1039,6 +1066,8 @@ class TradingSession:
             weekly_dd_reduce       = risk_cfg.get("weekly_dd_reduce",     0.05),
             weekly_dd_halt         = risk_cfg.get("weekly_dd_halt",       0.07),
             max_dd_from_peak       = risk_cfg.get("max_dd_from_peak",     0.10),
+            allow_fractional_shares= bool(risk_cfg.get("allow_fractional_shares", False)),
+            fractional_precision   = int(risk_cfg.get("fractional_precision", 6)),
         )
         _print(
             f"      RiskManager ready  equity=${equity:,.2f}",

@@ -366,6 +366,8 @@ class RiskManager:
         correlation_window:       int   = 60,
         duplicate_window_secs:    int   = 60,
         max_spread_pct:           float = 0.005,
+        allow_fractional_shares:  bool  = False,
+        fractional_precision:     int   = 6,
     ) -> None:
         self.initial_equity           = initial_equity
         self.max_risk_per_trade       = max_risk_per_trade
@@ -383,6 +385,8 @@ class RiskManager:
         self.correlation_window       = correlation_window
         self.duplicate_window_secs    = duplicate_window_secs
         self.max_spread_pct           = max_spread_pct
+        self.allow_fractional_shares  = allow_fractional_shares
+        self.fractional_precision     = max(0, int(fractional_precision))
 
         # Equity tracking
         self._current_equity:       float            = initial_equity
@@ -706,7 +710,9 @@ class RiskManager:
         Compute whole shares satisfying target_weight AND 1% risk-rule cap.
 
         Position size = min(weight-based, risk-based).
-        Returns floor (no fractional shares).
+        Returns whole shares by default (floor). Set
+        ``allow_fractional_shares=True`` at construction to keep fractional
+        precision (Alpaca supports fractional for equities + crypto).
         """
         equity               = self._current_equity
         weight_based_dollars = equity * min(target_weight, self.max_single_position)
@@ -719,6 +725,8 @@ class RiskManager:
                 risk_based_shares = max_risk_dollars / risk_per_share
                 weight_based_shares = min(weight_based_shares, risk_based_shares)
 
+        if self.allow_fractional_shares:
+            return round(float(weight_based_shares), self.fractional_precision)
         return float(int(weight_based_shares))   # floor to whole shares
 
     # ----------------------------------------------------------------------- #

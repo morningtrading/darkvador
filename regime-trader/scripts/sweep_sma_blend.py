@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 CFG = ROOT / "config" / "settings.yaml"
 BAK = CFG.read_text(encoding="utf-8")
 
-WEIGHTS = [0.3, 0.5, 0.7, 0.9]  # 1.0 baseline already known
+WEIGHTS = [0.80, 0.85, 0.88, 0.92, 0.95]  # refined around 0.9 peak
 
 results = []
 try:

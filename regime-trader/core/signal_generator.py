@@ -226,6 +226,61 @@ class SignalGenerator:
         for sym in self.symbols:
             self._current_weights[sym] = weights.get(sym, 0.0)
 
+    def reconcile_from_broker(
+        self,
+        broker_positions: Dict[str, float],
+        total_equity:     float,
+        drift_threshold:  float = 0.005,
+    ) -> Dict[str, float]:
+        """
+        True-up internal weights against the broker's reported positions.
+
+        Prevents the internal ``_current_weights`` from drifting away from
+        reality when a fill is missed, an order is placed out-of-band, or
+        an API call silently fails. Call periodically (e.g. at the top of
+        each trading loop tick).
+
+        Parameters
+        ----------
+        broker_positions :
+            Map of symbol -> dollar market value as reported by the broker
+            (e.g. ``sum(qty_i * last_price_i)`` per symbol, signed for shorts).
+        total_equity :
+            Total account equity from the broker. Used to derive weights.
+        drift_threshold :
+            Log a warning whenever the absolute weight drift on any symbol
+            exceeds this value (default 0.5%).
+
+        Returns
+        -------
+        Dict[str, float]
+            The drift (broker_weight - internal_weight) per symbol before
+            reconciliation. Useful for dashboards / alerts.
+        """
+        if total_equity <= 0:
+            logger.warning(
+                "reconcile_from_broker skipped: non-positive equity %.2f",
+                total_equity,
+            )
+            return {}
+
+        drift: Dict[str, float] = {}
+        for sym in self.symbols:
+            broker_val = float(broker_positions.get(sym, 0.0))
+            broker_w   = broker_val / total_equity
+            internal_w = self._current_weights.get(sym, 0.0)
+            d          = broker_w - internal_w
+            drift[sym] = d
+            if abs(d) >= drift_threshold:
+                logger.warning(
+                    "Weight drift on %s: internal=%.4f broker=%.4f Δ=%+.4f "
+                    "→ reconciling to broker truth",
+                    sym, internal_w, broker_w, d,
+                )
+            self._current_weights[sym] = broker_w
+
+        return drift
+
     def get_current_regime(self) -> Optional[str]:
         """Return the regime label from the most recently generated signal, or None."""
         return self._last_signal.regime if self._last_signal else None

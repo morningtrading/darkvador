@@ -44,18 +44,7 @@ broker = cfg.get("broker", {}) or {}
 paper = bool(broker.get("paper_trading", True))
 feed = broker.get("data_feed", "iex")
 
-api_key = creds.get("ALPACA_API_KEY_PAPER" if paper else "ALPACA_API_KEY_LIVE")
-sec_key = creds.get("ALPACA_API_SECRET_PAPER" if paper else "ALPACA_API_SECRET_LIVE")
-if not api_key or not sec_key:
-    print("ERROR: missing Alpaca credentials in config/credentials.yaml")
-    sys.exit(1)
-
-client = AlpacaClient(
-    api_key=str(api_key),
-    secret_key=str(sec_key),
-    paper=paper,
-    data_feed=str(feed),
-)
+client = AlpacaClient(paper=paper, data_feed=str(feed))
 client.connect()
 print(f"Connected to Alpaca (paper={paper}, feed={feed})")
 print()
