@@ -28,6 +28,16 @@ else
     SSH_PEER_USER="${SSH_PEER_USER:-morningtrading}"
 fi
 
+# ── python interpreter ───────────────────────────────────────
+if [ "$OS_KIND" = "windows" ]; then
+    PYTHON="py -3.12"
+else
+    if [ -f "$ROOT/.venv/bin/activate" ]; then
+        source "$ROOT/.venv/bin/activate"
+    fi
+    PYTHON="$(command -v python3)"
+fi
+
 # ── colours ──────────────────────────────────────────────────
 CYAN='\033[1;36m'
 YELLOW='\033[1;33m'
@@ -39,11 +49,11 @@ DIM='\033[2m'
 RESET='\033[0m'
 
 # ── active asset group (loaded from registry) ────────────────
-# Registry: config/asset_groups.yaml (managed via `py -3.12 main.py groups`)
+# Registry: config/asset_groups.yaml (managed via `$PYTHON main.py groups`)
 AVAILABLE_GROUPS=()
 declare -A GROUP_PREVIEW   # name -> "SYM1 SYM2 ... (N symbols)"
 load_groups() {
-    mapfile -t AVAILABLE_GROUPS < <(py -3.12 main.py groups list --names-only 2>/dev/null)
+    mapfile -t AVAILABLE_GROUPS < <($PYTHON main.py groups list --names-only 2>/dev/null)
     if [ ${#AVAILABLE_GROUPS[@]} -eq 0 ]; then
         AVAILABLE_GROUPS=("stocks")
     fi
@@ -51,7 +61,7 @@ load_groups() {
     GROUP_PREVIEW=()
     while IFS=$'\t' read -r _gname _gprev; do
         [ -n "$_gname" ] && GROUP_PREVIEW["$_gname"]="$_gprev"
-    done < <(py -3.12 main.py groups list --json 2>/dev/null | py -3.12 -c "
+    done < <($PYTHON main.py groups list --json 2>/dev/null | $PYTHON -c "
 import sys, json
 try:
     d = json.load(sys.stdin)
@@ -64,7 +74,7 @@ except Exception:
 ")
 }
 load_groups
-DEFAULT_GROUP="$(py -3.12 main.py groups default 2>/dev/null | head -n1)"
+DEFAULT_GROUP="$($PYTHON main.py groups default 2>/dev/null | head -n1)"
 ASSET_GROUP="${DEFAULT_GROUP:-${AVAILABLE_GROUPS[0]}}"
 
 # ── active config set ─────────────────────────────────────────
@@ -152,47 +162,47 @@ show_help() {
     echo -e "${YELLOW}══ MENU COMMANDS ═══════════════════════════════════════════════${RESET}"
     echo ""
     local groups_csv paper_flag rebal_iv
-    groups_csv="$(py -3.12 main.py groups list --names-only 2>/dev/null | paste -sd, - | sed 's/,/, /g')"
-    paper_flag="$(py -3.12 -c "import yaml; print(yaml.safe_load(open('config/settings.yaml'))['broker']['paper_trading'])" 2>/dev/null)"
-    rebal_iv="$(py -3.12 -c "import yaml; print(yaml.safe_load(open('config/settings.yaml'))['backtest']['min_rebalance_interval'])" 2>/dev/null)"
+    groups_csv="$($PYTHON main.py groups list --names-only 2>/dev/null | paste -sd, - | sed 's/,/, /g')"
+    paper_flag="$($PYTHON -c "import yaml; print(yaml.safe_load(open('config/settings.yaml'))['broker']['paper_trading'])" 2>/dev/null)"
+    rebal_iv="$($PYTHON -c "import yaml; print(yaml.safe_load(open('config/settings.yaml'))['backtest']['min_rebalance_interval'])" 2>/dev/null)"
 
-    echo -e "  ${GREEN}[0]${RESET} Full Cycle      → py -3.12 main.py full-cycle --start 2020-01-01"
+    echo -e "  ${GREEN}[0]${RESET} Full Cycle      → $PYTHON main.py full-cycle --start 2020-01-01"
     echo -e "       Trains HMM and backtests ${CYAN}every${RESET} registered asset group,"
     echo -e "       then prints a consolidated summary table."
     echo -e "       Iterates: ${groups_csv}"
     echo ""
-    echo -e "  ${GREEN}[1]${RESET} Train HMM       → py -3.12 main.py trade --train-only --asset-group ${ASSET_GROUP}"
+    echo -e "  ${GREEN}[1]${RESET} Train HMM       → $PYTHON main.py trade --train-only --asset-group ${ASSET_GROUP}"
     echo -e "       Fetches latest bars, fits the HMM, saves to models/hmm.pkl, exits."
     echo ""
-    echo -e "  ${GREEN}[2]${RESET} Dry Run         → py -3.12 main.py trade --dry-run --asset-group ${ASSET_GROUP}"
+    echo -e "  ${GREEN}[2]${RESET} Dry Run         → $PYTHON main.py trade --dry-run --asset-group ${ASSET_GROUP}"
     echo -e "       Full live pipeline (signals, sizing, risk) but places ${RED}no orders${RESET}."
     echo ""
-    echo -e "  ${GREEN}[3]${RESET} Live / Paper    → py -3.12 main.py trade --asset-group ${ASSET_GROUP}"
+    echo -e "  ${GREEN}[3]${RESET} Live / Paper    → $PYTHON main.py trade --asset-group ${ASSET_GROUP}"
     echo -e "       Real trading loop. broker.paper_trading = ${paper_flag}."
     echo ""
-    echo -e "  ${GREEN}[4]${RESET} Backtest Quick  → py -3.12 main.py backtest --asset-group ${ASSET_GROUP} --start 2020-01-01"
+    echo -e "  ${GREEN}[4]${RESET} Backtest Quick  → $PYTHON main.py backtest --asset-group ${ASSET_GROUP} --start 2020-01-01"
     echo -e "       Walk-forward backtest, no benchmark (faster)."
     echo ""
-    echo -e "  ${GREEN}[5]${RESET} Backtest Group  → py -3.12 main.py backtest --asset-group ${ASSET_GROUP} --start 2020-01-01 --compare"
+    echo -e "  ${GREEN}[5]${RESET} Backtest Group  → $PYTHON main.py backtest --asset-group ${ASSET_GROUP} --start 2020-01-01 --compare"
     echo -e "       Walk-forward backtest + benchmark comparison table."
     echo ""
-    echo -e "  ${GREEN}[6]${RESET} Forward Test    → py -3.12 main.py backtest --asset-group ${ASSET_GROUP} --start 2024-01-01 --compare"
+    echo -e "  ${GREEN}[6]${RESET} Forward Test    → $PYTHON main.py backtest --asset-group ${ASSET_GROUP} --start 2024-01-01 --compare"
     echo -e "       Hold-out out-of-sample test from 2024."
     echo ""
-    echo -e "  ${GREEN}[7]${RESET} Stress Test     → py -3.12 main.py stress --asset-group ${ASSET_GROUP} --start 2020-01-01"
+    echo -e "  ${GREEN}[7]${RESET} Stress Test     → $PYTHON main.py stress --asset-group ${ASSET_GROUP} --start 2020-01-01"
     echo -e "       Crash / gap / vol-spike scenario suite."
     echo ""
     echo -e "  ${GREEN}[8]${RESET} Train+Backtest  → retrains HMM then runs Backtest (with benchmark)."
     echo ""
     # Pull current HMM params + default grids from argparse
     local cur_conf cur_stab sweep_default_grid cs_conf_grid cs_stab_grid
-    cur_conf="$(py -3.12 -c "import yaml; print(yaml.safe_load(open('config/settings.yaml'))['hmm']['min_confidence'])" 2>/dev/null)"
-    cur_stab="$(py -3.12 -c "import yaml; print(yaml.safe_load(open('config/settings.yaml'))['hmm']['stability_bars'])" 2>/dev/null)"
-    sweep_default_grid="$(py -3.12 main.py sweep --help 2>/dev/null | awk -F'default:' '/--values/ || /default:/{print $2}' | tr -d ')' | xargs | head -c80)"
-    cs_conf_grid="$(py -3.12 main.py cs-sweep --help 2>/dev/null | awk '/--conf/{flag=1} flag && /default:/{print; exit}' | sed -E 's/.*default: ?//' | tr -d ')' | xargs)"
-    cs_stab_grid="$(py -3.12 main.py cs-sweep --help 2>/dev/null | awk '/--stab/{flag=1} flag && /default:/{print; exit}' | sed -E 's/.*default: ?//' | tr -d ')' | xargs)"
+    cur_conf="$($PYTHON -c "import yaml; print(yaml.safe_load(open('config/settings.yaml'))['hmm']['min_confidence'])" 2>/dev/null)"
+    cur_stab="$($PYTHON -c "import yaml; print(yaml.safe_load(open('config/settings.yaml'))['hmm']['stability_bars'])" 2>/dev/null)"
+    sweep_default_grid="$($PYTHON main.py sweep --help 2>/dev/null | awk -F'default:' '/--values/ || /default:/{print $2}' | tr -d ')' | xargs | head -c80)"
+    cs_conf_grid="$($PYTHON main.py cs-sweep --help 2>/dev/null | awk '/--conf/{flag=1} flag && /default:/{print; exit}' | sed -E 's/.*default: ?//' | tr -d ')' | xargs)"
+    cs_stab_grid="$($PYTHON main.py cs-sweep --help 2>/dev/null | awk '/--stab/{flag=1} flag && /default:/{print; exit}' | sed -E 's/.*default: ?//' | tr -d ')' | xargs)"
 
-    echo -e "  ${GREEN}[p]${RESET} Interval Sweep  → py -3.12 main.py sweep --asset-group ${ASSET_GROUP} --start 2020-01-01"
+    echo -e "  ${GREEN}[p]${RESET} Interval Sweep  → $PYTHON main.py sweep --asset-group ${ASSET_GROUP} --start 2020-01-01"
     echo -e "       ${DIM}Purpose:${RESET} find the best ${CYAN}min_rebalance_interval${RESET} — the number of bars"
     echo -e "       to lock out further rebalances after one fires. 0 = off (rebalance any time);"
     echo -e "       higher values suppress churn but delay reaction to regime changes."
@@ -202,7 +212,7 @@ show_help() {
     echo -e "       ${DIM}Output:${RESET} ranked table (Sharpe / return / #trades / max DD per interval)"
     echo -e "       ${DIM}When to run:${RESET} after changing symbols / HMM params — the optimum drifts."
     echo ""
-    echo -e "  ${GREEN}[r]${RESET} Conf×Stab Sweep → py -3.12 main.py cs-sweep --asset-group ${ASSET_GROUP} --start 2020-01-01"
+    echo -e "  ${GREEN}[r]${RESET} Conf×Stab Sweep → $PYTHON main.py cs-sweep --asset-group ${ASSET_GROUP} --start 2020-01-01"
     echo -e "       ${DIM}Purpose:${RESET} 2-D grid search over two HMM gating thresholds:"
     echo -e "         ${CYAN}min_confidence${RESET}  — posterior-probability floor to trust a regime call"
     echo -e "                           (currently: ${YELLOW}${cur_conf}${RESET})"
@@ -225,14 +235,14 @@ show_help() {
 
     # ── Asset groups (live) ──────────────────────────────────────
     echo -e "${YELLOW}══ ASSET GROUPS (config/asset_groups.yaml) ═════════════════════${RESET}"
-    py -3.12 main.py groups list 2>/dev/null | sed 's/^/  /'
+    $PYTHON main.py groups list 2>/dev/null | sed 's/^/  /'
     echo ""
-    echo -e "  ${DIM}Manage: py -3.12 main.py groups <list|show|add|remove|edit|rename|set-default|validate|export|import>${RESET}"
+    echo -e "  ${DIM}Manage: $PYTHON main.py groups <list|show|add|remove|edit|rename|set-default|validate|export|import>${RESET}"
     echo ""
 
     # ── Parameters (live, from settings.yaml) ────────────────────
     echo -e "${YELLOW}══ PARAMETERS (config/settings.yaml, set: ${MAGENTA}${active_set}${YELLOW}) ═══════════════${RESET}"
-    py -3.12 -c "
+    $PYTHON -c "
 import yaml
 cfg = yaml.safe_load(open('config/settings.yaml'))
 for section, body in cfg.items():
@@ -252,11 +262,11 @@ for section, body in cfg.items():
 " 2>/dev/null
 
     # ── CLI flags per subcommand (live, from argparse) ───────────
-    echo -e "${YELLOW}══ CLI FLAGS PER SUBCOMMAND (py -3.12 main.py <cmd> --help) ════${RESET}"
+    echo -e "${YELLOW}══ CLI FLAGS PER SUBCOMMAND ($PYTHON main.py <cmd> --help) ════${RESET}"
     echo ""
     for cmd in trade backtest stress full-cycle sweep cs-sweep groups; do
         echo -e "  ${GREEN}▸ ${cmd}${RESET}"
-        py -3.12 main.py "$cmd" --help 2>/dev/null \
+        $PYTHON main.py "$cmd" --help 2>/dev/null \
             | awk '/^  -/{print "    " $0}' \
             | sed 's/^    --/    --/'
         echo ""
@@ -364,7 +374,7 @@ select_group() {
         preview="${GROUP_PREVIEW[$name]:-}"
         echo -e "  ${BLUE}[${num}]${RESET}  ${name}   ${DIM}${preview}${RESET}"
     done
-    echo -e "  ${DIM}(tip: add a group with: py -3.12 main.py groups add <name> --symbols A,B,C)${RESET}"
+    echo -e "  ${DIM}(tip: add a group with: $PYTHON main.py groups add <name> --symbols A,B,C)${RESET}"
     echo ""
     read -rp "  Your choice: " gchoice
     if [[ "$gchoice" =~ ^[0-9]+$ ]]; then
@@ -405,57 +415,57 @@ while true; do
         0)
             run_command \
                 "Full Cycle — HMM + Backtest for ALL 3 groups" \
-                "py -3.12 main.py full-cycle --start 2020-01-01"
+                "$PYTHON main.py full-cycle --start 2020-01-01"
             ;;
         1)
             run_command \
                 "Train HMM — group: $ASSET_GROUP" \
-                "py -3.12 main.py trade --train-only --asset-group $ASSET_GROUP"
+                "$PYTHON main.py trade --train-only --asset-group $ASSET_GROUP"
             ;;
         2)
             run_command \
                 "Dry Run — group: $ASSET_GROUP" \
-                "py -3.12 main.py trade --dry-run --asset-group $ASSET_GROUP"
+                "$PYTHON main.py trade --dry-run --asset-group $ASSET_GROUP"
             ;;
         3)
             run_command \
                 "Live / Paper Trade — group: $ASSET_GROUP" \
-                "py -3.12 main.py trade --asset-group $ASSET_GROUP"
+                "$PYTHON main.py trade --asset-group $ASSET_GROUP"
             ;;
         4)
             run_command \
                 "Backtest group: $ASSET_GROUP  2020-now (no benchmark, fast)" \
-                "py -3.12 main.py backtest --asset-group $ASSET_GROUP --start 2020-01-01"
+                "$PYTHON main.py backtest --asset-group $ASSET_GROUP --start 2020-01-01"
             ;;
         5)
             run_command \
                 "Backtest group: $ASSET_GROUP  2020-now (benchmark)" \
-                "py -3.12 main.py backtest --asset-group $ASSET_GROUP --start 2020-01-01 --compare"
+                "$PYTHON main.py backtest --asset-group $ASSET_GROUP --start 2020-01-01 --compare"
             ;;
         6)
             run_command \
                 "Forward Test — group: $ASSET_GROUP  2024-today (hold-out)" \
-                "py -3.12 main.py backtest --asset-group $ASSET_GROUP --start 2024-01-01 --compare"
+                "$PYTHON main.py backtest --asset-group $ASSET_GROUP --start 2024-01-01 --compare"
             ;;
         7)
             run_command \
                 "Stress Test — group: $ASSET_GROUP  2020-now" \
-                "PYTHONIOENCODING=utf-8 py -3.12 main.py stress --asset-group $ASSET_GROUP --start 2020-01-01"
+                "PYTHONIOENCODING=utf-8 $PYTHON main.py stress --asset-group $ASSET_GROUP --start 2020-01-01"
             ;;
         8)
             run_command \
                 "Train HMM + Backtest — group: $ASSET_GROUP" \
-                "py -3.12 main.py trade --train-only --asset-group $ASSET_GROUP && py -3.12 main.py backtest --asset-group $ASSET_GROUP --start 2020-01-01 --compare"
+                "$PYTHON main.py trade --train-only --asset-group $ASSET_GROUP && $PYTHON main.py backtest --asset-group $ASSET_GROUP --start 2020-01-01 --compare"
             ;;
         p|P)
             run_command \
                 "Interval Sweep — group: $ASSET_GROUP  2020-now" \
-                "py -3.12 main.py sweep --asset-group $ASSET_GROUP --start 2020-01-01"
+                "$PYTHON main.py sweep --asset-group $ASSET_GROUP --start 2020-01-01"
             ;;
         r|R)
             run_command \
                 "Conf×Stab Grid Sweep — group: $ASSET_GROUP  2020-now" \
-                "py -3.12 main.py cs-sweep --asset-group $ASSET_GROUP --start 2020-01-01"
+                "$PYTHON main.py cs-sweep --asset-group $ASSET_GROUP --start 2020-01-01"
             ;;
         t|T)
             echo ""
