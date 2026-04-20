@@ -2311,14 +2311,18 @@ def run_train_only(config: Dict, args: Optional[argparse.Namespace] = None) -> N
     )
 
     # ── Detailed regime statistics ────────────────────────────────────────
+    _CANONICAL = ["CRASH","STRONG_BEAR","BEAR","WEAK_BEAR","NEUTRAL","WEAK_BULL","BULL","STRONG_BULL","EUPHORIA"]
+
     regimes: Optional[pd.Series] = getattr(engine, "_training_regimes", None)
     if regimes is not None and len(regimes) > 0:
-        _print("\n[bold cyan]Regime Breakdown (in-sample)[/bold cyan]", console)
-        _print(f"  {'Regime':<16} {'Bars':>6} {'%Time':>7} {'AvgDur':>8} {'MinDur':>7} {'MaxDur':>7}", console)
-        _print("  " + "─" * 57, console)
+        present = set(regimes)
+        ordered_labels = [l for l in _CANONICAL if l in present] + \
+                         [l for l in present if l not in _CANONICAL]
+        idx_map = {lbl: i + 1 for i, lbl in enumerate(ordered_labels)}
 
-        all_labels = list(dict.fromkeys(regimes))  # preserve order of first appearance
-        ordered_labels = sorted(set(regimes), key=lambda x: list(regimes).index(x))
+        _print("\n[bold cyan]Regime Breakdown (in-sample)[/bold cyan]", console)
+        _print(f"  {'#':>2}  {'Regime':<16} {'Bars':>6} {'%Time':>7} {'AvgDur':>8} {'MinDur':>7} {'MaxDur':>7}", console)
+        _print("  " + "─" * 61, console)
 
         # Compute run-length encoding for durations
         _runs: Dict[str, list] = {}
@@ -2332,33 +2336,32 @@ def run_train_only(config: Dict, args: Optional[argparse.Namespace] = None) -> N
         _runs.setdefault(cur_label, []).append(cur_len)
 
         total_bars = len(regimes)
-        for lbl in sorted(set(regimes)):
+        for lbl in ordered_labels:
             runs = _runs.get(lbl, [1])
             count = sum(runs)
             pct   = count / total_bars * 100
             avg_d = sum(runs) / len(runs)
             _print(
-                f"  {lbl:<16} {count:>6}  {pct:>6.1f}%  {avg_d:>7.1f}  {min(runs):>6}  {max(runs):>6}",
+                f"  {idx_map[lbl]:>2}  {lbl:<16} {count:>6}  {pct:>6.1f}%  {avg_d:>7.1f}  {min(runs):>6}  {max(runs):>6}",
                 console,
             )
 
         n_changes = int((regimes != regimes.shift()).sum()) - 1
-        _print("  " + "─" * 57, console)
+        _print("  " + "─" * 61, console)
         _print(f"  Total regime changes : {n_changes}", console)
         _print(f"  Avg bars per regime  : {total_bars / max(n_changes + 1, 1):.1f}", console)
-        _print(f"  Current regime       : [bold]{regimes.iloc[-1]}[/bold]  (last bar: {regimes.index[-1]})", console)
+        _print(f"  Current regime       : [bold]{regimes.iloc[-1]}[/bold]  #{idx_map[regimes.iloc[-1]]}  (last bar: {regimes.index[-1]})", console)
 
-        # Transition matrix
+        # Transition matrix (ordered logically)
         _print("\n[bold cyan]Transition Matrix (counts)[/bold cyan]", console)
-        labels_sorted = sorted(set(regimes))
-        header = f"  {'':>14} " + " ".join(f"{l[:8]:>9}" for l in labels_sorted)
+        header = f"  {'#→':>4}  {'':>12} " + " ".join(f"{idx_map[l]:>6}" for l in ordered_labels)
         _print(header, console)
-        for from_l in labels_sorted:
+        for from_l in ordered_labels:
             row = ""
-            for to_l in labels_sorted:
+            for to_l in ordered_labels:
                 mask = (regimes == from_l) & (regimes.shift(-1) == to_l)
-                row += f" {int(mask.sum()):>9}"
-            _print(f"  {from_l[:14]:<14}{row}", console)
+                row += f" {int(mask.sum()):>6}"
+            _print(f"  {idx_map[from_l]:>2}    {from_l[:12]:<12}{row}", console)
 
     client.disconnect()
 
