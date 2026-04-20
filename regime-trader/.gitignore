@@ -34,3 +34,10 @@ logs/
 # OS
 .DS_Store
 Thumbs.db
+
+# Scratch / temp files
+*.bak
+*.tmp
+pending prompt*.txt
+never ask me*.txt
+*Copie*
