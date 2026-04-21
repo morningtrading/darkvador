@@ -14,6 +14,17 @@ ALPACA_API_KEY / ALPACA_SECRET_KEY environment variables.
 
 from __future__ import annotations
 
+# ─── Force single-threaded BLAS for cross-platform reproducibility ──────────
+# MUST be set BEFORE numpy/scipy/hmmlearn are imported. Multi-threaded BLAS
+# (OpenBLAS, MKL, Accelerate) uses non-deterministic reduction orders that
+# produce bit-different results across machines, causing HMM EM to converge
+# to different local optima on Windows vs Linux despite fixed random_state.
+# Performance cost: ~2-3x slower HMM fitting. Benefit: identical results.
+import os as _os
+for _var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
+             "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
+    _os.environ.setdefault(_var, "1")
+
 import argparse
 import datetime as dt
 import json
