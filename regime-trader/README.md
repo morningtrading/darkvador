@@ -111,6 +111,19 @@ py -3.12 -m venv .venv
 pip install -r requirements.txt
 ```
 
+> **⚠️ Cross-platform reproducibility**
+>
+> Backtest results are **only bit-identical across Linux machines** (Ubuntu 24.04,
+> Linux Mint 22.2, and WSL2 Ubuntu-24.04 all produce the same pickle-exact output
+> down to the penny). **Windows native Python produces different results** — not a
+> bug, but an inherent consequence of MSVC-compiled numpy/scipy/hmmlearn wheels
+> vs the GCC-compiled Linux wheels. The HMM EM algorithm converges to slightly
+> different local optima → different regime labels → different trades → different P&L.
+>
+> **For any published or production backtest, run on Linux (native or WSL2).**
+> Windows native is fine for development and quick iteration. See
+> `tools/verify_parity.sh` to audit cross-machine drift.
+
 ### 2. Credentials
 
 Create `config/credentials.yaml` (already git-ignored):

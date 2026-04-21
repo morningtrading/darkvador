@@ -1,0 +1,18 @@
+# Normalise line endings: store everything as LF in the repo.
+# Checkout converts to CRLF on Windows if core.autocrlf=true, LF elsewhere.
+# This guarantees git hash-object gives the same hash on every platform for
+# the same logical file content.
+* text=auto eol=lf
+
+# Binary files — never touch
+*.pkl  binary
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.zip  binary
+*.gz   binary
+*.tar  binary
+*.pdf  binary
+*.xlsx binary
+*.db   binary
