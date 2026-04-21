@@ -13,7 +13,10 @@
       "Bash(pip3 install *)",
       "Bash(python3 -m venv .venv)",
       "Bash(.venv/bin/pip install *)",
-      "Bash(git *)"
+      "Bash(git *)",
+      "Bash(gh auth *)",
+      "Bash(sudo apt *)",
+      "Read(//home/titus/.claude/**)"
     ]
   }
 }
