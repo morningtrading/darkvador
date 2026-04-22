@@ -514,7 +514,9 @@ class PerformanceAnalyzer:
             ]
 
         if _rich:
-            console = Console(file=buf, width=80)
+            # force_terminal=True preserves color codes in the buffered string,
+            # which we also echo to real stdout at the end when print_to_console.
+            console = Console(file=buf, width=80, force_terminal=True)
             tbl = Table(title="Performance Summary", box=rbox.ROUNDED, header_style="bold cyan")
             tbl.add_column("Metric", style="dim", min_width=22)
             tbl.add_column("Value", justify="right")
@@ -615,7 +617,7 @@ class PerformanceAnalyzer:
                         lines.append(row_str)
 
         output = buf.getvalue() + "\n".join(lines)
-        if print_to_console and not _rich:
+        if print_to_console:
             print(output)
         return output
 
