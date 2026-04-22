@@ -30,7 +30,15 @@
       "Bash('/c/Program Files/Tailscale/tailscale.exe' ssh titus@antecresi \"bash -ic 'type transfert' && ls /home/titus/regime-trader/regime-trader/menu/tailscale_transfer.sh\")",
       "Bash(powershell -Command \"Get-Service sshd 2>&1 | Format-List Name,Status,StartType; Get-WindowsCapability -Online -Name OpenSSH.Server* | Select-Object Name,State; Get-NetFirewallRule -Name sshd -ErrorAction SilentlyContinue | Select-Object Name,Enabled,Direction,Action\")",
       "Bash(powershell.exe -Command \"Get-WindowsCapability -Online | Where-Object Name -like 'OpenSSH*'\")",
-      "Bash(PYTHONIOENCODING=utf-8 START=2020-01-01 py -3.12 scripts/sweep_sma_window.py)"
+      "Bash(PYTHONIOENCODING=utf-8 START=2020-01-01 py -3.12 scripts/sweep_sma_window.py)",
+      "Bash(cd \"C:\\\\\\\\Users\\\\\\\\espac\\\\\\\\localrepo\")",
+      "Bash(cd \"C:\\\\\\\\Users\\\\\\\\espac\\\\\\\\localrepo\\\\\\\\regime-trader\")",
+      "PowerShell(cd C:\\\\Users\\\\espac\\\\localrepo\\\\regime-trader; $env:PYTHONIOENCODING=\"utf-8\"; py -3.12 main.py backtest --start 2020-01-01 --end 2026-01-01)",
+      "PowerShell(cd C:\\\\Users\\\\espac\\\\localrepo\\\\regime-trader; $env:PYTHONIOENCODING=\"utf-8\"; py -3.12 main.py backtest --symbols QQQ --start 2020-01-01 --end 2026-01-01)",
+      "PowerShell(cd C:\\\\Users\\\\espac\\\\localrepo\\\\regime-trader; $env:PYTHONIOENCODING=\"utf-8\"; py -3.12 main.py backtest --asset-group stocks --start 2020-01-01 --end 2026-01-01)",
+      "PowerShell(cd C:\\\\Users\\\\espac\\\\localrepo\\\\regime-trader; $env:PYTHONIOENCODING=\"utf-8\"; py -3.12 main.py backtest --asset-group stocks --start 2020-01-01 --end 2026-01-01 2>&1 | Select-String -Pattern \"Regime|Folds|OOS|Total|Final|Backtest complete\")",
+      "PowerShell(cd C:\\\\Users\\\\espac\\\\localrepo\\\\regime-trader; $env:PYTHONIOENCODING=\"utf-8\"; py -3.12 main.py backtest --asset-group stocks --start 2020-01-01 --end 2026-01-01 2>&1 | Select-String -Pattern \"Regime|Folds|OOS|Total|Final|Backtest|HMM states|CRASH|BEAR|NEUTRAL|BULL|EUPHORIA\")",
+      "Bash(git push*)"
     ]
   }
 }
