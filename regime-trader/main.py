@@ -1796,7 +1796,49 @@ class TradingSession:
 
             # ---- 10. Multi-strategy health checks + allocator rebalance ---------
             if self._multi_strat_mode and self.strategy_registry is not None:
+                _pre_enabled = {
+                    n: getattr(s, "is_enabled", True)
+                    for n, s in self.strategy_registry.all().items()
+                }
                 self.strategy_registry.run_health_checks()
+                for _sn, _was in _pre_enabled.items():
+                    _s = self.strategy_registry.get(_sn)
+                    if _was and _s is not None and not getattr(_s, "is_enabled", True):
+                        _reason = "health check failed"
+                        _hc = getattr(_s, "_last_health", None)
+                        if _hc is not None:
+                            _reason = getattr(_hc, "reason_if_unhealthy", _reason) or _reason
+                        self.alert_manager.alert_strategy_disabled(_sn, _reason)
+                        self.dashboard.update(event=f"[{_sn}] auto-disabled: {_reason}")
+
+                # Correlation cluster detection (pair > 0.80)
+                try:
+                    _hist = {}
+                    for _sn, _syms in self._strat_symbols.items():
+                        _p = self.strategy_registry.get(_sn)
+                        if _p is None or not getattr(_p, "is_enabled", True):
+                            continue
+                        _series = [
+                            self._price_history[_s].pct_change().dropna()
+                            for _s in _syms if _s in self._price_history
+                        ]
+                        if _series:
+                            _df = pd.concat(_series, axis=1).dropna()
+                            if len(_df) >= 20:
+                                _hist[_sn] = _df.mean(axis=1)
+                    if len(_hist) >= 2:
+                        _corr_df = pd.DataFrame(_hist).dropna().corr()
+                        _hot_pairs = []
+                        _names = list(_corr_df.columns)
+                        for _i in range(len(_names)):
+                            for _j in range(_i + 1, len(_names)):
+                                _c = float(_corr_df.iloc[_i, _j])
+                                if _c > 0.80:
+                                    _hot_pairs.append((_names[_i], _names[_j], _c))
+                        if _hot_pairs:
+                            self.alert_manager.alert_correlation_cluster(_hot_pairs)
+                except Exception as _exc:
+                    logger.debug("Correlation cluster check skipped: %s", _exc)
 
                 self._bars_since_alloc += 1
                 if self._bars_since_alloc >= self._alloc_interval_bars:
@@ -1806,6 +1848,7 @@ class TradingSession:
                         self.capital_allocator.total_capital = _cur_equity
                         _dd_state = self.risk_manager.get_drawdown_state()
                         _daily_dd = max(0.0, getattr(_dd_state, "dd_today", 0.0))
+                        _prev_weights = dict(self._alloc_weights or {})
                         self._alloc_weights = self.capital_allocator.allocate(
                             self.strategy_registry,
                             daily_drawdown=_daily_dd,
@@ -1818,8 +1861,28 @@ class TradingSession:
                             "Allocator rebalanced: %s",
                             {k: f"{v:.2f}" for k, v in self._alloc_weights.items()},
                         )
+                        _changed = any(
+                            abs(self._alloc_weights.get(_k, 0.0) - _prev_weights.get(_k, 0.0)) > 0.01
+                            for _k in set(self._alloc_weights) | set(_prev_weights)
+                        )
+                        if _changed:
+                            self.alert_manager.alert_allocator_rebalance(
+                                self._alloc_weights, trigger="scheduled"
+                            )
                     except Exception as exc:
                         logger.error("Allocator rebalance failed: %s", exc)
+
+                # Portfolio-level DD breaker (fires if lock file was written this bar)
+                if self.portfolio_rm is not None:
+                    from core.risk_manager import LOCK_FILE as _LOCK
+                    if _LOCK.exists() and not getattr(self, "_prm_dd_alerted", False):
+                        _risk_cfg = self.config.get("risk", {})
+                        self.alert_manager.alert_portfolio_dd_breaker(
+                            equity        = self.risk_manager._current_equity,
+                            drawdown_pct  = abs(self.risk_manager.get_drawdown_state().dd_from_peak),
+                            threshold_pct = _risk_cfg.get("max_dd_from_peak", 0.10),
+                        )
+                        self._prm_dd_alerted = True
 
             # ---- 11. Dashboard refresh & position update --------------------
             try:

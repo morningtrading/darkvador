@@ -363,6 +363,80 @@ class AlertManager:
             alert_key = "flicker_exceeded",
         )
 
+    def alert_strategy_disabled(
+        self,
+        strategy_name: str,
+        reason:        str,
+    ) -> bool:
+        """Alert when a strategy is auto-disabled by a failed health check."""
+        return self.alert(
+            title   = f"Strategy Auto-Disabled: {strategy_name}",
+            message = (
+                f"Strategy '{strategy_name}' was auto-disabled by its health check.\n"
+                f"  Reason : {reason}\n"
+                f"  Action : capital will be reallocated on next rebalance."
+            ),
+            level     = "WARNING",
+            alert_key = f"strategy_disabled_{strategy_name.lower()}",
+        )
+
+    def alert_allocator_rebalance(
+        self,
+        weights:       Dict[str, float],
+        trigger:       str = "scheduled",
+    ) -> bool:
+        """Alert when the capital allocator rebalances strategy weights."""
+        weight_str = ", ".join(f"{k}:{v:.2f}" for k, v in sorted(weights.items()))
+        return self.alert(
+            title   = f"Allocator Rebalance ({trigger})",
+            message = (
+                f"Capital allocator rebalanced strategy weights.\n"
+                f"  Trigger : {trigger}\n"
+                f"  Weights : {{{weight_str}}}"
+            ),
+            level     = "INFO",
+            alert_key = "allocator_rebalance",
+        )
+
+    def alert_correlation_cluster(
+        self,
+        pairs:     list,
+        threshold: float = 0.80,
+    ) -> bool:
+        """Alert when strategy pair-wise correlation exceeds *threshold*.
+
+        Parameters
+        ----------
+        pairs : list of (strat_a, strat_b, corr) tuples above the threshold.
+        """
+        lines = "\n".join(
+            f"  {a} <-> {b}: {c:.2f}" for a, b, c in pairs
+        )
+        return self.alert(
+            title   = f"Correlation Cluster Detected (>{threshold:.2f})",
+            message = (
+                f"Strategy pair-wise correlation breached threshold.\n"
+                f"{lines}\n"
+                f"  Effect : correlated strategies may be merged in risk checks."
+            ),
+            level     = "WARNING",
+            alert_key = "correlation_cluster",
+        )
+
+    def alert_portfolio_dd_breaker(
+        self,
+        equity:       float,
+        drawdown_pct: float,
+        threshold_pct: float,
+    ) -> bool:
+        """Alert when the portfolio-level drawdown breaker fires."""
+        return self.alert_circuit_breaker(
+            breaker_type  = "PORTFOLIO_DD_HALT",
+            equity        = equity,
+            drawdown_pct  = drawdown_pct,
+            threshold_pct = threshold_pct,
+        )
+
     def alert_order_error(
         self,
         symbol:        str,

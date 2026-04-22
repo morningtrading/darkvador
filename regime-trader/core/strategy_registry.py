@@ -140,6 +140,11 @@ class StrategyRegistry:
                 logger.error("Health check failed for '%s': %s", name, exc)
                 continue
 
+            try:
+                setattr(strategy, "_last_health", health)
+            except Exception:
+                pass
+
             if not health.is_healthy and getattr(strategy, "is_enabled", True):
                 logger.warning(
                     "Strategy '%s' is UNHEALTHY (%s) — auto-disabling.",
