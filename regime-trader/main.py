@@ -1123,6 +1123,16 @@ class TradingSession:
             console, style="dim",
         )
 
+        # TradeLogger must exist before step 5 (set_context is called after
+        # position sync). AlertManager and Dashboard are created later, after
+        # port_snapshot is available.
+        from monitoring.logger import TradeLogger
+        self.trade_logger = TradeLogger(
+            log_dir   = monitor_cfg.get("log_dir", "logs/"),
+            log_level = monitor_cfg.get("log_level", "INFO"),
+        )
+        self.trade_logger.setup()
+
         # ── 5. Position tracker ───────────────────────────────────────────────
         _print("\n[5/7] Syncing positions ...", console)
         from broker.position_tracker import PositionTracker
@@ -1259,15 +1269,9 @@ class TradingSession:
             )
 
         # ── Monitoring ────────────────────────────────────────────────────────
-        from monitoring.logger import TradeLogger
+        # TradeLogger is already constructed above (before position sync).
         from monitoring.alerts import AlertManager
         from monitoring.dashboard import Dashboard
-
-        self.trade_logger = TradeLogger(
-            log_dir   = monitor_cfg.get("log_dir", "logs/"),
-            log_level = monitor_cfg.get("log_level", "INFO"),
-        )
-        self.trade_logger.setup()
 
         self.alert_manager = AlertManager(
             rate_limit_minutes = monitor_cfg.get("alert_rate_limit_minutes", 15),
