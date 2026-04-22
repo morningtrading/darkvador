@@ -94,3 +94,19 @@ monitoring:
   log_level: INFO
   log_dir: logs/
   log_rotation_mb: 50
+strategies:
+  hmm_regime:
+    enabled: true
+    symbols: [SPY, QQQ]
+    weight_min: 0.10
+    weight_max: 0.50
+  momentum_breakout:
+    enabled: true
+    symbols: [AAPL, NVDA, TSLA]
+    weight_min: 0.05
+    weight_max: 0.30
+  mean_reversion:
+    enabled: false
+    symbols: [XLU, XLP]
+    weight_min: 0.05
+    weight_max: 0.25

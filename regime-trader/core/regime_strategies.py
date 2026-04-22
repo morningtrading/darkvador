@@ -44,15 +44,35 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
+from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional, Type
+from typing import Any, Deque, Dict, List, Optional, Tuple, Type
 
 import pandas as pd
 
 from core.hmm_engine import RegimeInfo, RegimeState
 
 logger = logging.getLogger(__name__)
+
+
+# ── Strategy health ────────────────────────────────────────────────────────────
+
+@dataclass
+class StrategyHealth:
+    """
+    Point-in-time health snapshot for a single strategy.
+
+    A strategy is UNHEALTHY if ANY condition is met:
+    - drawdown from own peak > 15 %
+    - Sharpe over the last 60 days < -1.0
+    - 10+ consecutive losing days
+    """
+    is_healthy: bool
+    recent_sharpe: float
+    current_drawdown: float
+    consecutive_losing_days: int
+    reason_if_unhealthy: Optional[str] = None
 
 
 # ── Enumerations ───────────────────────────────────────────────────────────────
@@ -147,16 +167,45 @@ def _atr(
 
 # ── Base strategy ABC ──────────────────────────────────────────────────────────
 
+# Health thresholds — centralised so tests can monkey-patch them.
+_HEALTH_MAX_DRAWDOWN: float = 0.15        # 15 % from own equity peak
+_HEALTH_MIN_SHARPE: float = -1.0          # 60-day Sharpe floor
+_HEALTH_MAX_CONSEC_LOSSES: int = 10       # consecutive losing days
+_PERF_HISTORY_DAYS: int = 60             # rolling window kept in memory
+
+
 class BaseStrategy(ABC):
     """
     Abstract base for all regime strategies.
 
     Concrete strategies implement :meth:`generate_signal` and expose
     :attr:`name` and :attr:`total_allocation`.
+
+    State tracking (Phase 1)
+    ------------------------
+    is_enabled           : can be toggled without restart
+    allocated_capital    : capital currently assigned by the allocator (dollars)
+    performance_history  : deque of (date, daily_return) tuples, max 60 entries
+    current_positions    : {symbol: position_size_pct} as of the last signal batch
+    _equity_peak         : high-water mark of strategy equity (for drawdown)
+    _equity_current      : latest strategy equity estimate
+    _consecutive_losses  : streak of days with negative return
     """
 
-    #: Minimum bars required to compute 50-EMA and 14-period ATR.
     MIN_BARS: int = 60
+
+    def __init__(self) -> None:
+        self.is_enabled: bool = True
+        self.allocated_capital: float = 0.0
+        self.performance_history: Deque[Tuple[pd.Timestamp, float]] = deque(
+            maxlen=_PERF_HISTORY_DAYS
+        )
+        self.current_positions: Dict[str, float] = {}
+        self._equity_peak: float = 1.0
+        self._equity_current: float = 1.0
+        self._consecutive_losses: int = 0
+
+    # ── Abstract interface ─────────────────────────────────────────────────────
 
     @property
     @abstractmethod
@@ -192,6 +241,98 @@ class BaseStrategy(ABC):
         -------
         :class:`Signal`, or ``None`` when bars are insufficient.
         """
+
+    # ── Lifecycle hooks ────────────────────────────────────────────────────────
+
+    def on_enable(self) -> None:
+        """Called when the strategy transitions from disabled → enabled."""
+        logger.info("Strategy '%s' enabled.", self.name)
+
+    def on_disable(self) -> None:
+        """Called when the strategy transitions from enabled → disabled."""
+        logger.info("Strategy '%s' disabled.", self.name)
+
+    # ── Performance tracking ───────────────────────────────────────────────────
+
+    def record_daily_return(self, timestamp: pd.Timestamp, daily_return: float) -> None:
+        """
+        Push one day's return into the rolling history.
+
+        Updates the equity curve, high-water mark, and consecutive-loss streak.
+        Call this once per trading day from the backtester or live loop.
+        """
+        self.performance_history.append((timestamp, daily_return))
+
+        self._equity_current *= (1.0 + daily_return)
+        if self._equity_current > self._equity_peak:
+            self._equity_peak = self._equity_current
+
+        if daily_return < 0.0:
+            self._consecutive_losses += 1
+        else:
+            self._consecutive_losses = 0
+
+    def get_recent_sharpe(self, window_days: int = 60) -> float:
+        """
+        Annualised Sharpe over the last *window_days* daily returns.
+
+        Returns 0.0 when there are fewer than 2 observations.
+        """
+        returns = [r for _, r in self.performance_history][-window_days:]
+        if len(returns) < 2:
+            return 0.0
+        import statistics
+        mean = statistics.mean(returns)
+        std = statistics.stdev(returns)
+        if std < 1e-10:
+            return 0.0
+        return (mean / std) * (252 ** 0.5)
+
+    def get_current_drawdown(self) -> float:
+        """
+        Drawdown from the strategy's own equity peak (positive fraction, e.g. 0.12 = 12 %).
+        """
+        if self._equity_peak <= 0.0:
+            return 0.0
+        return max(0.0, 1.0 - self._equity_current / self._equity_peak)
+
+    # ── Health check ───────────────────────────────────────────────────────────
+
+    def health_check(self) -> StrategyHealth:
+        """
+        Evaluate whether this strategy should remain active.
+
+        Returns a :class:`StrategyHealth` with ``is_healthy=False`` and a
+        ``reason_if_unhealthy`` string if any threshold is breached.
+        """
+        sharpe = self.get_recent_sharpe()
+        drawdown = self.get_current_drawdown()
+        consec = self._consecutive_losses
+
+        reasons: List[str] = []
+        if drawdown > _HEALTH_MAX_DRAWDOWN:
+            reasons.append(
+                f"drawdown {drawdown:.1%} > {_HEALTH_MAX_DRAWDOWN:.0%}"
+            )
+        if sharpe < _HEALTH_MIN_SHARPE:
+            reasons.append(
+                f"60d Sharpe {sharpe:.2f} < {_HEALTH_MIN_SHARPE}"
+            )
+        if consec >= _HEALTH_MAX_CONSEC_LOSSES:
+            reasons.append(
+                f"{consec} consecutive losing days ≥ {_HEALTH_MAX_CONSEC_LOSSES}"
+            )
+
+        is_healthy = len(reasons) == 0
+        return StrategyHealth(
+            is_healthy=is_healthy,
+            recent_sharpe=sharpe,
+            current_drawdown=drawdown,
+            consecutive_losing_days=consec,
+            reason_if_unhealthy=("; ".join(reasons) if reasons else None),
+        )
+
+    # ── Internal helpers ───────────────────────────────────────────────────────
 
     def _has_enough_bars(self, bars: pd.DataFrame) -> bool:
         required_cols = {"open", "high", "low", "close", "volume"}
@@ -230,6 +371,7 @@ class LowVolBullStrategy(BaseStrategy):
         atr_stop_mult: float = 3.0,
         ema_stop_mult: float = 0.5,
     ) -> None:
+        super().__init__()
         self._allocation = allocation
         self._leverage = leverage
         self.ema_period = ema_period
@@ -322,6 +464,7 @@ class MidVolCautiousStrategy(BaseStrategy):
         atr_period: int = 14,
         ema_stop_mult: float = 0.5,
     ) -> None:
+        super().__init__()
         self.allocation_above_ema = allocation_above_ema
         self.allocation_below_ema = allocation_below_ema
         self.ema_period = ema_period
@@ -414,6 +557,7 @@ class HighVolDefensiveStrategy(BaseStrategy):
         atr_period: int = 14,
         ema_stop_mult: float = 1.0,
     ) -> None:
+        super().__init__()
         self._allocation = allocation
         self.ema_period = ema_period
         self.atr_period = atr_period
