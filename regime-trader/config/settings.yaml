@@ -97,7 +97,7 @@ monitoring:
 strategies:
   hmm_regime:
     enabled: true
-    symbols: [SPY, QQQ]
+    symbols: [SPY]
     weight_min: 0.10
     weight_max: 0.50
   momentum_breakout:
@@ -106,7 +106,17 @@ strategies:
     weight_min: 0.05
     weight_max: 0.30
   mean_reversion:
-    enabled: false
+    enabled: true
     symbols: [XLU, XLP]
     weight_min: 0.05
     weight_max: 0.25
+  bond_trend:
+    enabled: true
+    symbols: [TLT, IEF]
+    weight_min: 0.05
+    weight_max: 0.30
+  commodity_momentum:
+    enabled: true
+    symbols: [GLD, USO]
+    weight_min: 0.05
+    weight_max: 0.30

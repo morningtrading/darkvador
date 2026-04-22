@@ -2135,8 +2135,14 @@ def _run_multi_strat_backtest(
     logging.getLogger("hmmlearn").setLevel(logging.ERROR)
     logging.getLogger("core.hmm_engine").setLevel(logging.WARNING)
 
+    # Scale aggregate-exposure cap with strategy count. Default PRM cap is 0.80,
+    # designed for single-strategy use; with N fully-invested sub-portfolios the
+    # aggregate approaches 100% and every new signal gets vetoed. Cap at 1.5
+    # (50% leverage headroom) and scale with N so 2 strategies → ~1.0, 5 → 1.5.
+    prm_cap = min(1.5, 0.5 + 0.25 * len(specs))
     try:
-        result = mbt.run(prices, specs)
+        result = mbt.run(prices, specs,
+                         portfolio_rm_config={"max_aggregate_exposure": prm_cap})
     except Exception as exc:
         _print(f"[red]Multi-strat backtest failed:[/red] {exc}", console)
         sys.exit(1)
