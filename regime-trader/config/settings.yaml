@@ -17,10 +17,10 @@ hmm:
   n_init: 10
   covariance_type: full
   min_train_bars: 252
-  stability_bars: 5
+  stability_bars: 12
   flicker_window: 20
-  flicker_threshold: 2
-  min_confidence: 0.68
+  flicker_threshold: 4
+  min_confidence: 0.62
   extended_features: true
   use_vix_features: true
   use_credit_spread_features: false
@@ -37,10 +37,10 @@ hmm:
 strategy:
   low_vol_allocation: 0.95
   mid_vol_allocation_trend: 0.95
-  mid_vol_allocation_no_trend: 0.75
-  high_vol_allocation: 0.75
+  mid_vol_allocation_no_trend: 0.70
+  high_vol_allocation: 0.60
   low_vol_leverage: 1.25
-  rebalance_threshold: 0.15
+  rebalance_threshold: 0.18
   uncertainty_size_mult: 0.5
   trend_lookback: 50
   trend_min_slope: 0.0
@@ -69,7 +69,7 @@ risk:
 backtest:
   initial_capital: 100000
   slippage_pct: 0.0005
-  min_rebalance_interval: 0
+  min_rebalance_interval: 5
   train_window: 252
   test_window: 63
   step_size: 63
