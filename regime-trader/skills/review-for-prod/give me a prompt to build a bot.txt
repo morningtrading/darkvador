@@ -1,0 +1,260 @@
+give me a prompt to build a bot for trading crypto with various strategies. each strategy can be added at a later stage. connect to hyperliquid qnd find most promising cryptos on vqruious time scale.
+
+
+Use this as a builder prompt for ChatGPT, Claude, Gemini, or a coding agent:
+
+Build a modular crypto trading bot focused on Hyperliquid that can support multiple strategies as plug-ins, where strategies can be added, removed, or upgraded later without changing the core engine.
+
+Goal
+Create a production-minded MVP trading system that:
+
+Connects to Hyperliquid for market data and trading.
+Scans markets to identify the most promising crypto opportunities across multiple timeframes.
+Supports multiple trading strategies through a clean strategy interface.
+Allows new strategies to be added later as separate modules.
+Includes strong risk management, paper trading, backtesting, and live execution support.
+Produces clear analytics, rankings, and execution logs.
+Core Requirements
+1. Architecture
+Design the bot with a modular architecture containing these components:
+
+Exchange Connector
+Connect to Hyperliquid REST/WebSocket APIs.
+Fetch live prices, candles, order book, funding, open interest if available, and account/position data.
+Support both testnet/paper mode and live mode.
+Market Scanner
+Continuously scan tradable assets on Hyperliquid.
+Rank coins by opportunity score across different timeframes such as:
+5m
+15m
+1h
+4h
+1d
+Detect promising setups using market structure, momentum, volatility, volume, trend strength, and funding/basis conditions if relevant.
+Strategy Engine
+Create a base strategy interface so strategies can be plugged in later.
+Each strategy should expose methods like:
+initialize()
+generate_signal(market_data)
+size_position(account_state, risk_rules)
+should_exit(position, market_data)
+on_fill(order_event)
+Strategies must remain independent from the execution engine.
+Execution Engine
+Place, amend, cancel, and monitor orders.
+Support market, limit, stop-loss, take-profit, and trailing logic where possible.
+Handle slippage checks, duplicate order prevention, and retry rules.
+Risk Manager
+Enforce:
+max risk per trade
+max daily loss
+max concurrent positions
+max leverage
+max exposure per coin
+global kill switch
+Block trading when volatility, spread, or liquidity conditions are unsafe.
+Portfolio and Analytics Module
+Track realized and unrealized PnL.
+Compute win rate, profit factor, Sharpe ratio, drawdown, expectancy, and strategy-level performance.
+Compare performance by strategy and timeframe.
+Backtester
+Run strategies on historical candle data.
+Output metrics, trade logs, drawdown, and equity curve.
+Make it easy to test newly added strategies.
+Config System
+Use environment variables plus config files.
+Keep secrets secure.
+Allow enabling/disabling strategies without changing code.
+2. Strategy Plug-in System
+Implement the system so these strategies can exist now or be added later:
+
+Trend following
+Mean reversion
+Breakout
+Momentum
+VWAP reversion
+Funding-rate arbitrage
+Market-making
+Copy-trading / wallet-following
+Multi-timeframe confirmation strategy
+Create a base class or interface for strategies and include at least 2 example strategies implemented end-to-end, while making it simple to add more later.
+
+3. Opportunity Discovery
+The bot must identify the most promising cryptos on Hyperliquid across multiple timeframes.
+
+Define a ranking framework that scores each asset using factors such as:
+
+trend strength
+relative volume
+volatility expansion
+breakout potential
+liquidity
+spread quality
+funding rate signal
+open interest change if available
+momentum alignment across timeframes
+noise vs clean directional movement
+For each asset, produce:
+
+symbol
+timeframe
+composite opportunity score
+reason for ranking
+suggested strategy type
+risk grade
+Create a ranked watchlist such as:
+
+Top 10 short-term opportunities
+Top 10 intraday opportunities
+Top 10 swing opportunities
+4. Safety and Deployment
+Include:
+
+paper trading mode
+dry-run mode
+structured logging
+alerting hooks
+error handling
+graceful restart behavior
+rate-limit handling
+reconnect logic for WebSockets
+Docker support
+instructions for VPS deployment
+5. Output Format
+Provide:
+
+A recommended project structure
+Well-organized code in either Python or TypeScript
+Inline comments
+Example config files
+A sample strategy plug-in interface
+At least 2 implemented sample strategies
+Hyperliquid connector code
+Market scanner and ranking logic
+Backtesting module
+Run instructions
+Technical Preferences
+Prefer:
+
+Python if fast prototyping is the priority
+TypeScript if stronger production structure is preferred
+If choosing Python, use libraries like:
+
+asyncio
+websockets
+httpx or aiohttp
+pandas
+numpy
+pydantic
+If choosing TypeScript, use:
+
+Node.js
+WebSocket client
+typed interfaces
+clean service/module separation
+Implementation Details
+The system should:
+
+use WebSocket for real-time market feeds where possible
+use REST for snapshots and fallback flows
+separate signal generation from trade execution
+support historical replay/backtesting
+store trades and metrics locally first, with optional DB support later
+be written in a way that another developer can extend easily
+Example Deliverables
+Generate:
+
+folder structure
+full MVP codebase
+.env.example
+config.yaml or config.json
+strategy base interface
+momentum_strategy example
+breakout_strategy example
+Hyperliquid API client
+scanner that ranks assets by opportunity score on 5m, 15m, 1h, 4h, and 1d
+CLI or simple dashboard output showing top ranked coins
+backtest script
+README with setup and usage steps
+Constraints
+Do not hardcode secrets.
+Do not assume profitability.
+Default to paper trading first.
+Include realistic warnings about slippage, latency, liquidation, and overfitting.
+Code should be modular, readable, and easy to extend.
+Nice-to-Have Features
+If feasible, also include:
+
+Telegram or Discord alerts
+SQLite or Postgres storage
+simple web dashboard
+strategy performance comparison page
+parameter optimization framework
+wallet-following module for Hyperliquid leaderboard traders
+funding-rate monitoring
+opportunity scoring explanation output
+Final Instruction
+Produce the result as a practical, extensible MVP for a Hyperliquid trading bot with modular strategy support and multi-timeframe coin opportunity discovery. Start with the architecture, then generate the codebase step by step.
+
+If you want a stronger version specifically tuned for code generation, use this tighter prompt:
+
+Build a modular Hyperliquid crypto trading bot in Python.
+
+Requirements:
+
+Exchange: Hyperliquid
+Modes: paper trading, dry run, live trading
+Architecture: exchange client, scanner, strategy interface, execution engine, risk manager, portfolio tracker, backtester
+Strategies must be plug-ins that can be added later without modifying core engine
+Implement 2 starter strategies:
+momentum strategy
+breakout strategy
+Scan all supported Hyperliquid markets and rank the most promising coins on:
+5m
+15m
+1h
+4h
+1d
+For each coin/timeframe, compute an opportunity score using:
+momentum
+volatility
+relative volume
+trend strength
+liquidity/spread
+funding signal if available
+Output ranked lists for:
+short-term
+intraday
+swing
+Include:
+Hyperliquid REST/WebSocket integration
+modular folder structure
+typed models
+config files
+.env.example
+structured logs
+backtesting support
+risk limits
+order execution abstraction
+sample README
+Keep strategy logic separate from execution logic
+Make the code easy to extend with new strategies later
+Default to paper trading
+Include comments and setup instructions
+Use clean, production-minded code
+Return:
+
+project structure
+full source code
+config examples
+run instructions
+explanation of how to add a new strategy
+A few practical notes:
+
+Hyperliquid is a strong fit because bots can use real-time WebSocket execution and leaderboard-style market context, and recent community tooling also shows active TypeScript and CLI ecosystems around Hyperliquid bots and analytics. 
+github.com
+ 
+registry.npmjs.org
+If your real goal is finding promising coins, the key is not “best coin” prediction but a scoring/ranking engine across timeframes, liquidity, volatility, momentum, and funding conditions.
+If you want a scalable MVP, Python is usually the fastest starting point; TypeScript is attractive if you want a more production-style real-time service architecture.
+A logical next step would be to decide whether you want the prompt optimized for Python, TypeScript, or copy-trading + scanner specifically.
