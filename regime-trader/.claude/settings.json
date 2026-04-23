@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(tailscale status *)",
+      "Bash(source .venv/bin/activate && python3 main.py *)",
+      "Bash(source .venv/bin/activate && python3 -m pytest *)",
+      "Bash(.venv/bin/python3 main.py *)",
+      "Bash(python3 main.py *)",
+      "Bash(python3 -m pytest *)",
+      "Bash(pip3 install *)",
+      "Bash(pip install *)",
+      "Bash(.venv/bin/pip install *)",
+      "Bash(.venv/bin/pip3 install *)",
+      "Bash(python3 -m venv *)",
+      "Bash(sudo apt *)",
+      "Bash(sudo apt-get *)"
+    ]
+  }
+}
