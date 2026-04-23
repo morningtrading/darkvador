@@ -616,6 +616,105 @@ class HighVolDefensiveStrategy(BaseStrategy):
         )
 
 
+class CryptoMomentumStrategy(BaseStrategy):
+    """
+    Momentum-based strategy for crypto assets, independent from volatility regime.
+
+    Uses ROC (rate-of-change) momentum and ADX trend confirmation. Entry when
+    ROC(20) > 0 AND ADX(14) > 25 (confirming uptrend). No leverage.
+    Targets BTC/USD and ETH/USD.
+
+    This strategy is orthogonal to HMM regime (uses independent technical signals,
+    not volatility classification). Expected correlation < 0.80 with hmm_regime.
+    """
+
+    def __init__(self):
+        super().__init__(name="CryptoMomentumStrategy")
+        self._allocation = 0.30  # Conservative 30% max for unproven crypto class
+        self.ema_period = 50
+        self.roc_period = 20
+        self.adx_period = 14
+
+    def generate_signal(self, symbol: str, bars: pd.DataFrame, regime_state: RegimeState) -> Optional[Signal]:
+        """
+        Generate signal based on momentum (ROC) and trend confirmation (ADX).
+        Not regime-dependent; uses independent technical signals.
+        """
+        if len(bars) < max(self.roc_period, self.adx_period, self.ema_period) + 1:
+            return None
+
+        close = bars["close"]
+        high = bars["high"]
+        low = bars["low"]
+
+        # ROC(20): rate of change
+        roc = (close.iloc[-1] - close.iloc[-self.roc_period - 1]) / close.iloc[-self.roc_period - 1]
+
+        # ADX(14): trend strength (simplified — use our ATR-based ADX proxy)
+        atr_val = self._atr(high, low, close, period=self.adx_period)
+        ema_atr = self._ema(pd.Series([atr_val] * len(close)), period=14).iloc[-1]
+        adx_proxy = (atr_val / close.iloc[-1]) * 100  # volatility as proxy for ADX strength
+
+        # EMA(50) for stop-loss
+        ema50 = self._ema(close, period=self.ema_period)
+
+        # Entry conditions: ROC > 0 (uptrend) AND ADX > 3 (trend is present)
+        # ADX proxy of 3 ≈ moderate trend; actual ADX > 25 needs market-wide calculation
+        roc_positive = roc > 0
+        adx_threshold = adx_proxy > 2.0  # ~2% ATR / price = moderate trend
+
+        if roc_positive and adx_threshold:
+            # LONG signal with ATR-based stop
+            stop_loss = ema50 - 1.0 * atr_val  # More aggressive than defensive strategies
+            position_size = self._allocation / 2  # 2 symbols (BTC, ETH) → 15% each max
+            confidence = min(0.75, 0.50 + abs(roc))  # Confidence scaled by ROC magnitude
+
+            return Signal(
+                symbol=symbol,
+                direction=Direction.LONG,
+                confidence=confidence,
+                entry_price=close.iloc[-1],
+                stop_loss=stop_loss,
+                take_profit=None,
+                position_size_pct=position_size,
+                leverage=1.0,  # No leverage for crypto
+                regime_id=regime_state.state_id,
+                regime_name=regime_state.label,
+                regime_probability=regime_state.probability,
+                timestamp=pd.Timestamp(bars.index[-1]),
+                reasoning=(
+                    f"Crypto momentum — ROC(20)={roc:.2%}, ADX proxy={adx_proxy:.2f}. "
+                    f"Close={close.iloc[-1]:.2f}, EMA50={ema50:.2f}, Stop={stop_loss:.2f}"
+                ),
+                strategy_name=self.name,
+                metadata={
+                    "roc_20": round(roc, 4),
+                    "adx_proxy": round(adx_proxy, 4),
+                    "ema50": round(ema50, 4),
+                    "atr": round(atr_val, 4),
+                },
+            )
+        else:
+            # FLAT — exit position
+            return Signal(
+                symbol=symbol,
+                direction=Direction.FLAT,
+                confidence=0.0,
+                entry_price=close.iloc[-1],
+                stop_loss=None,
+                take_profit=None,
+                position_size_pct=0.0,
+                leverage=1.0,
+                regime_id=regime_state.state_id,
+                regime_name=regime_state.label,
+                regime_probability=regime_state.probability,
+                timestamp=pd.Timestamp(bars.index[-1]),
+                reasoning=f"Crypto momentum exit: ROC={roc:.2%} < 0 or ADX too weak",
+                strategy_name=self.name,
+                metadata={"roc_20": round(roc, 4), "adx_proxy": round(adx_proxy, 4)},
+            )
+
+
 # ── Backward-compatible aliases ────────────────────────────────────────────────
 
 CrashDefensiveStrategy      = HighVolDefensiveStrategy

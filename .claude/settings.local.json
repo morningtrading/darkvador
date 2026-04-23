@@ -38,7 +38,9 @@
       "PowerShell(cd C:\\\\Users\\\\espac\\\\localrepo\\\\regime-trader; $env:PYTHONIOENCODING=\"utf-8\"; py -3.12 main.py backtest --asset-group stocks --start 2020-01-01 --end 2026-01-01)",
       "PowerShell(cd C:\\\\Users\\\\espac\\\\localrepo\\\\regime-trader; $env:PYTHONIOENCODING=\"utf-8\"; py -3.12 main.py backtest --asset-group stocks --start 2020-01-01 --end 2026-01-01 2>&1 | Select-String -Pattern \"Regime|Folds|OOS|Total|Final|Backtest complete\")",
       "PowerShell(cd C:\\\\Users\\\\espac\\\\localrepo\\\\regime-trader; $env:PYTHONIOENCODING=\"utf-8\"; py -3.12 main.py backtest --asset-group stocks --start 2020-01-01 --end 2026-01-01 2>&1 | Select-String -Pattern \"Regime|Folds|OOS|Total|Final|Backtest|HMM states|CRASH|BEAR|NEUTRAL|BULL|EUPHORIA\")",
-      "Bash(git push*)"
+      "Bash(git push*)",
+      "Bash(mkdir -p /c/Users/espac/.claude/skills)",
+      "Bash(cp -r /c/Users/espac/localrepo/.claude/skills/* /c/Users/espac/.claude/skills/)"
     ]
   }
 }

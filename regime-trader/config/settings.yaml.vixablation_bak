@@ -1,3 +1,6 @@
+# Asset groups live in config/asset_groups.yaml.
+# Manage them with: py -3.12 main.py groups <list|add|remove|edit|...>
+
 broker:
   paper_trading: true
   asset_group: stocks
@@ -12,35 +15,31 @@ broker:
   - META
   - TSLA
   - AMD
-  - BTC/USD
-  - ETH/USD
   timeframe: 5Min
   base_url_paper: https://paper-api.alpaca.markets
   base_url_live: https://api.alpaca.markets
   data_feed: iex
 hmm:
   n_candidates:
+  - 3
+  - 4
   - 5
+  - 6
+  - 7
   n_init: 10
   covariance_type: full
   min_train_bars: 252
-  stability_bars: 5
+  stability_bars: 5              # cs-sweep validated optimum for indices
   flicker_window: 20
   flicker_threshold: 2
-  min_confidence: 0.68
-  extended_features: true
-  use_vix_features: true
-  use_credit_spread_features: false
-  regime_proxy: QQQ
+  min_confidence: 0.62           # joint optimum: interval+cs sweeps on indices 2020-2026
+  extended_features: true   # true (default): adds vol_ratio, adx_14, dist_sma200 — set false to revert to base only
+  use_vix_features: false    # adds vix_level + vix_zscore_60 cross-asset features (fetches VXX / ^VIX)
   features:
   - log_ret_1
   - realized_vol_20
-  blend_exclude:
-  - GLD
-  - VNQ
-  - EFA
-  - EEM
-  - EWG
+  blend_exclude:           # symbols excluded from log_ret_1 / realized_vol_20 blending
+  - GLD                    # non-equity assets add cross-asset noise to the HMM feature blend
 strategy:
   low_vol_allocation: 0.95
   mid_vol_allocation_trend: 0.95
@@ -51,13 +50,6 @@ strategy:
   uncertainty_size_mult: 0.5
   trend_lookback: 50
   trend_min_slope: 0.0
-  sma_hard_gate: false
-  sma_soft_mult: 1.0
-  vol_target_annual: 0.0
-  vol_target_min_mult: 0.25
-  vol_target_max_mult: 1.5
-  vol_target_window: 20
-  sma_blend_weight: 1.0
 risk:
   max_risk_per_trade: 0.01
   max_single_position: 0.15
@@ -70,68 +62,20 @@ risk:
   weekly_dd_reduce: 0.05
   weekly_dd_halt: 0.07
   max_dd_from_peak: 0.1
-  allow_fractional_shares: false
-  fractional_precision: 6
 backtest:
   initial_capital: 100000
   slippage_pct: 0.0005
-  min_rebalance_interval: 0
+  min_rebalance_interval: 0   # 0 = off; set to N to lock out rebalances for N bars after each one
   train_window: 252
-  test_window: 63
-  step_size: 63
+  test_window: 126
+  step_size: 126
   risk_free_rate: 0.045
   benchmark_symbol: SPY
   commission_per_share: 0.0
   min_commission: 0.0
-  sma_long: 200
-  ema_fast: 9
-  ema_slow: 45
 monitoring:
   dashboard_refresh_seconds: 5
   alert_rate_limit_minutes: 15
   log_level: INFO
   log_dir: logs/
   log_rotation_mb: 50
-strategies:
-  hmm_regime:
-    enabled: true
-    symbols:
-    - SPY
-    weight_min: 0.1
-    weight_max: 0.5
-  momentum_breakout:
-    enabled: false
-    symbols:
-    - AAPL
-    - NVDA
-    - TSLA
-    weight_min: 0.05
-    weight_max: 0.3
-  mean_reversion:
-    enabled: false
-    symbols:
-    - XLU
-    - XLP
-    weight_min: 0.05
-    weight_max: 0.25
-  bond_trend:
-    enabled: false
-    symbols:
-    - TLT
-    - IEF
-    weight_min: 0.05
-    weight_max: 0.3
-  commodity_momentum:
-    enabled: false
-    symbols:
-    - GLD
-    - USO
-    weight_min: 0.05
-    weight_max: 0.3
-  crypto_momentum:
-    enabled: true
-    symbols:
-    - BTC/USD
-    - ETH/USD
-    weight_min: 0.05
-    weight_max: 0.30

@@ -1,0 +1,22 @@
+{
+	"folders": [
+		{
+			"path": "skills/add-broker-adapter"
+		},
+		{
+			"path": "skills/add-risk-check"
+		},
+		{
+			"path": "skills/backtest-strategy"
+		},
+		{
+			"path": "skills/generate-walkforward-report"
+		},
+		{
+			"path": "skills/review-for-prod"
+		},
+		{
+			"path": "skills/write-lookahead-test"
+		}
+	]
+}
