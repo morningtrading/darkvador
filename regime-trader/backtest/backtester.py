@@ -706,7 +706,7 @@ class WalkForwardBacktester:
             )
 
             # ── 5e2. Skip NEUTRAL regime if configured ──────────────────────
-            skip_neutral = self.config.get("strategy", {}).get("skip_neutral_regime", False)
+            skip_neutral = strat_cfg.get("strategy", {}).get("skip_neutral_regime", False)
             if skip_neutral and regime_state.label == "NEUTRAL":
                 signals = []  # Clear all signals → go to cash
 
