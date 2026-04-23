@@ -26,6 +26,48 @@ Supporting layer runs in parallel:
 
 ---
 
+## Multi-Strategy Mode
+
+The system can run several strategies in parallel under a single capital
+allocator and a portfolio-level risk manager. Use it when you want regime-
+based allocation (`hmm_regime`) to coexist with momentum, mean-reversion,
+bond, and commodity sleeves, each sized by its own contribution to portfolio
+risk and gated by an aggregate exposure cap.
+
+```
+StrategyRegistry  ─►  CapitalAllocator  ─►  PortfolioRiskManager  ─►  Broker
+   (health checks       (inverse_vol /         (max 80% gross,
+   auto-disable          risk_parity / ...      single-symbol cap,
+   bad strategies)       correlation merger)    daily/peak DD halt)
+```
+
+### Quick start
+
+```bash
+# Paper trade with all enabled strategies from settings.yaml + inverse-vol allocator
+py -3.12 main.py trade --paper
+
+# Pick a different allocator approach
+py -3.12 main.py trade --paper --allocator risk_parity
+
+# Restrict to a subset of strategies
+py -3.12 main.py trade --paper --strategies hmm_regime,momentum_breakout
+
+# Backtest the multi-strategy stack
+py -3.12 main.py backtest --multi-strat --allocator inverse_vol
+```
+
+Available `--allocator` values: `equal_weight`, `inverse_vol` (default),
+`risk_parity`, `performance_weighted`. Strategies and their per-strategy
+`weight_min` / `weight_max` floors live under `strategies:` in
+`config/settings.yaml`.
+
+See [docs/multistrat.md](docs/multistrat.md) for the full guide: how to add
+a strategy, how the correlation merger works, what each allocator approach
+optimises for, the portfolio risk caps, and the common failure modes.
+
+---
+
 ## Regime framework
 
 The HMM maps its internal states to vol tiers by sorting them on expected volatility (ascending). Labels are assigned by expected return (ascending). This makes the mapping independent of arbitrary state ordering.
