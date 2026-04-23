@@ -98,7 +98,7 @@ strategies:
     weight_min: 0.1
     weight_max: 0.5
   momentum_breakout:
-    enabled: true
+    enabled: false
     symbols:
     - AAPL
     - NVDA
