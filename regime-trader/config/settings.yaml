@@ -58,6 +58,7 @@ strategy:
   vol_target_max_mult: 1.5
   vol_target_window: 20
   sma_blend_weight: 1.0
+  skip_neutral_regime: true
 risk:
   max_risk_per_trade: 0.01
   max_single_position: 0.15

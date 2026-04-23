@@ -1077,6 +1077,11 @@ class MultiStrategyBacktester:
                     spec.symbols, bars_for_signal, regime_state, is_flickering
                 )
 
+                # Skip NEUTRAL regime if configured
+                skip_neutral = self.config.get("strategy", {}).get("skip_neutral_regime", False)
+                if skip_neutral and regime_state.label == "NEUTRAL":
+                    signals = []
+
                 if not signals:
                     continue
 

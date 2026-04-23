@@ -705,6 +705,11 @@ class WalkForwardBacktester:
                 self.symbols, bars_for_signal, regime_state, is_flickering
             )
 
+            # ── 5e2. Skip NEUTRAL regime if configured ──────────────────────
+            skip_neutral = self.config.get("strategy", {}).get("skip_neutral_regime", False)
+            if skip_neutral and regime_state.label == "NEUTRAL":
+                signals = []  # Clear all signals → go to cash
+
             # ── 5f. Queue target weights for execution at next bar ────────────
             if signals and bars_since_rebalance >= self.min_rebalance_interval:
                 pending = {
