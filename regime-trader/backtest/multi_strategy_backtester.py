@@ -1007,7 +1007,7 @@ class MultiStrategyBacktester:
                 daily_start_equity = total_equity
 
             # ── 5c. Health checks ──────────────────────────────────────────────
-            registry.run_health_checks()
+            registry.run_health_checks(bar_count=t)
 
             # ── 5d. Allocator rebalance (weekly) ──────────────────────────────
             bars_since_alloc += 1

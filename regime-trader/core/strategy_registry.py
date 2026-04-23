@@ -124,13 +124,24 @@ class StrategyRegistry:
                 if getattr(s, "is_enabled", True)
             }
 
-    def run_health_checks(self) -> None:
+    def run_health_checks(self, bar_count: int = 0) -> None:
         """
         Run health_check() on every registered strategy.
 
         Strategies that report unhealthy are auto-disabled via their
         on_disable() lifecycle hook and a warning is logged.
+
+        Parameters
+        ----------
+        bar_count : int
+            Current bar count. Health checks are skipped during warmup
+            (first 60 bars) to allow strategies to accumulate history
+            before evaluating performance-based checks.
         """
+        # Skip health checks during warmup period (first 60 bars)
+        if bar_count < 60:
+            return
+
         for name, strategy in self.all().items():
             if not hasattr(strategy, "health_check"):
                 continue
