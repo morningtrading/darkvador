@@ -69,6 +69,13 @@ class RejectionReason(str, Enum):
     CORRELATION_TOO_HIGH     = "correlation_above_reject_threshold"
     DUPLICATE_ORDER          = "duplicate_order_within_window"
     SPREAD_TOO_WIDE          = "bid_ask_spread_too_wide"
+    # ── Portfolio-level (PortfolioRiskManager) ─────────────────────────────────
+    PORTFOLIO_EXPOSURE       = "portfolio_aggregate_exposure"
+    PORTFOLIO_SYMBOL_CAP     = "portfolio_symbol_concentration"
+    PORTFOLIO_LEVERAGE       = "portfolio_total_leverage"
+    PORTFOLIO_DD_HALT        = "portfolio_drawdown_halt"
+    PORTFOLIO_PEAK_DD        = "portfolio_peak_drawdown_halt"
+    PORTFOLIO_CORR_CLUSTER   = "portfolio_correlated_cluster"
 
 
 # --------------------------------------------------------------------------- #
@@ -1048,4 +1055,438 @@ class RiskManager:
             weekly_dd_reduce         = float(r.get("weekly_dd_reduce",         0.05)),
             weekly_dd_halt           = float(r.get("weekly_dd_halt",           0.07)),
             max_dd_from_peak         = float(r.get("max_dd_from_peak",         0.10)),
+        )
+
+
+# --------------------------------------------------------------------------- #
+# PortfolioRiskManager                                                         #
+# --------------------------------------------------------------------------- #
+
+class PortfolioRiskManager:
+    """
+    Portfolio-level risk gate that sits ABOVE per-strategy RiskManagers.
+
+    HIERARCHY
+    ---------
+    Signal from Strategy_X
+      → Strategy_X.risk_manager.validate_signal()   (per-strategy)
+      → PortfolioRiskManager.validate_signal()       (portfolio-wide)  ← this class
+      → OrderExecutor
+
+    Both layers must approve a signal for an order to go through.
+    This class knows nothing about HMM or strategy internals — it only sees
+    the aggregate portfolio state and each incoming signal.
+
+    STATE TRACKED
+    -------------
+    _strategy_positions : {strategy_name: {symbol: dollar_value}}
+        Updated by the main loop after every fill via update_strategy_positions().
+        Used to compute per-strategy symbol exposure and aggregate totals.
+
+    CHECKS (applied in order, first failure returns)
+    -------------------------------------------------
+    1. Portfolio DD halt       — peak DD > 10% → lock file + reject all
+    2. Portfolio DD reduce     — daily DD > 3% → reject; > 2% → halve size
+    3. Aggregate exposure      — sum all positions > 80% → reduce or reject
+    4. Symbol concentration    — any symbol across strategies > 15% → reduce
+    5. Total leverage          — gross exposure / equity > 1.25x → reject
+    6. Correlation cluster     — correlated cluster > 30% exposure → reject
+
+    Parameters
+    ----------
+    max_aggregate_exposure  : Total gross exposure cap (default 0.80)
+    max_single_symbol       : Single symbol cap across all strategies (default 0.15)
+    max_portfolio_leverage  : Hard leverage ceiling (default 1.25)
+    max_corr_cluster        : Max exposure in a correlated cluster (default 0.30)
+    corr_cluster_threshold  : ρ above which two symbols are in the same cluster (0.70)
+    correlation_window      : Rolling bars for correlation estimate (60)
+    daily_dd_reduce         : Daily DD fraction that halves sizes (0.02)
+    daily_dd_halt           : Daily DD fraction that halts new trades (0.03)
+    max_dd_from_peak        : Peak DD fraction that halts + writes lock file (0.10)
+    min_position_usd        : Minimum residual position after size reduction ($100)
+    """
+
+    def __init__(
+        self,
+        max_aggregate_exposure: float = 0.80,
+        max_single_symbol:      float = 0.15,
+        max_portfolio_leverage: float = 1.25,
+        max_corr_cluster:       float = 0.30,
+        corr_cluster_threshold: float = 0.70,
+        correlation_window:     int   = 60,
+        daily_dd_reduce:        float = 0.02,
+        daily_dd_halt:          float = 0.03,
+        max_dd_from_peak:       float = 0.10,
+        min_position_usd:       float = 100.0,
+    ) -> None:
+        self.max_aggregate_exposure = max_aggregate_exposure
+        self.max_single_symbol      = max_single_symbol
+        self.max_portfolio_leverage = max_portfolio_leverage
+        self.max_corr_cluster       = max_corr_cluster
+        self.corr_cluster_threshold = corr_cluster_threshold
+        self.correlation_window     = correlation_window
+        self.daily_dd_reduce        = daily_dd_reduce
+        self.daily_dd_halt          = daily_dd_halt
+        self.max_dd_from_peak       = max_dd_from_peak
+        self.min_position_usd       = min_position_usd
+
+        # {strategy_name: {symbol: dollar_value}}
+        self._strategy_positions: Dict[str, Dict[str, float]] = {}
+
+    # ── State management ───────────────────────────────────────────────────────
+
+    def update_strategy_positions(
+        self,
+        strategy_name: str,
+        positions: Dict[str, float],
+    ) -> None:
+        """
+        Sync the portfolio manager's view of one strategy's open positions.
+
+        Call this after every fill or at the start of each bar.
+        ``positions`` maps symbol → current dollar value (positive = long).
+        """
+        self._strategy_positions[strategy_name] = dict(positions)
+
+    def get_aggregate_positions(self) -> Dict[str, float]:
+        """
+        Sum all strategies' dollar values per symbol.
+
+        Returns {symbol: total_dollar_value_across_strategies}.
+        """
+        agg: Dict[str, float] = {}
+        for pos_map in self._strategy_positions.values():
+            for sym, val in pos_map.items():
+                agg[sym] = agg.get(sym, 0.0) + val
+        return agg
+
+    # ── Primary public API ─────────────────────────────────────────────────────
+
+    def validate_signal(
+        self,
+        signal,
+        strategy_name: str,
+        portfolio_state: PortfolioState,
+    ) -> RiskDecision:
+        """
+        Run all portfolio-level checks against *signal* from *strategy_name*.
+
+        Returns a :class:`RiskDecision`.  If approved with modifications, the
+        modified signal carries the adjusted ``position_size_pct``.
+
+        The caller must also pass the signal through the per-strategy
+        RiskManager first — this method does NOT repeat those checks.
+        """
+        working_signal = copy.copy(signal)
+
+        # ── 1. Portfolio DD (no signal arg needed) ─────────────────────────────
+        dd_result = self.check_portfolio_dd(portfolio_state)
+        if dd_result is not None:
+            if not dd_result.approved:
+                logger.warning(
+                    "PORTFOLIO_RISK rejected %s from '%s' | %s",
+                    signal.symbol, strategy_name, dd_result.rejection_reason,
+                )
+                return dd_result
+            # Soft: daily_dd_reduce → halve the working signal's size
+            if dd_result.modifications:
+                working_signal = copy.copy(working_signal)
+                working_signal.position_size_pct = round(
+                    working_signal.position_size_pct * 0.5, 6
+                )
+                logger.info(
+                    "PORTFOLIO_RISK modified %s from '%s': %s",
+                    signal.symbol, strategy_name,
+                    " | ".join(dd_result.modifications),
+                )
+
+        # ── 2-5. Signal-level checks ───────────────────────────────────────────
+        signal_checks = [
+            self.check_aggregate_exposure,
+            self.check_symbol_aggregation,
+            self.check_total_leverage,
+            self.check_correlation_cluster,
+        ]
+
+        for check_fn in signal_checks:
+            result = check_fn(working_signal, portfolio_state)
+
+            if result is None:
+                continue
+
+            if not result.approved:
+                logger.warning(
+                    "PORTFOLIO_RISK rejected %s from '%s' | %s",
+                    signal.symbol, strategy_name, result.rejection_reason,
+                )
+                return result
+
+            if result.modified_signal is not None:
+                working_signal = result.modified_signal
+            if result.modifications:
+                logger.info(
+                    "PORTFOLIO_RISK modified %s from '%s': %s",
+                    signal.symbol, strategy_name,
+                    " | ".join(result.modifications),
+                )
+
+        return RiskDecision(
+            approved        = True,
+            modified_signal = working_signal,
+        )
+
+    # ── Individual checks ──────────────────────────────────────────────────────
+
+    def check_portfolio_dd(
+        self,
+        portfolio_state: PortfolioState,
+    ) -> Optional[RiskDecision]:
+        """
+        Fire on total portfolio drawdown, independent of per-strategy managers.
+
+        Peak DD > 10%  → halt + write lock file → hard rejection
+        Daily DD > 3%  → hard rejection (rest of session)
+        Daily DD > 2%  → halve size on current signal (soft, handled by caller)
+
+        Returns None when no DD threshold is breached.
+        Returns a RiskDecision with approved=False for halt/reject, or
+        approved=True with a halving note so the caller can apply it.
+        """
+        ps = portfolio_state
+        equity      = ps.equity
+        peak        = ps.peak_equity if ps.peak_equity > 0 else equity
+        daily_start = ps.daily_start if ps.daily_start > 0 else equity
+
+        peak_dd  = (equity - peak) / max(peak, 1e-9)           # negative = loss
+        daily_dd = (equity - daily_start) / max(daily_start, 1e-9)
+
+        if peak_dd <= -self.max_dd_from_peak:
+            if not LOCK_FILE.exists():
+                LOCK_FILE.write_text(
+                    f"Portfolio peak DD halt  peak_dd={peak_dd:.2%}  "
+                    f"equity={equity:.2f}  "
+                    f"ts={dt.datetime.utcnow().isoformat()}\n"
+                )
+                logger.error(
+                    "PORTFOLIO PEAK DD HALT: peak_dd=%.2f%%  lock file written -> %s",
+                    peak_dd * 100, LOCK_FILE,
+                )
+            return self._reject(
+                RejectionReason.PORTFOLIO_PEAK_DD,
+                f"Peak drawdown {peak_dd:.2%} <= -{self.max_dd_from_peak:.0%} threshold",
+            )
+
+        if daily_dd <= -self.daily_dd_halt:
+            return self._reject(
+                RejectionReason.PORTFOLIO_DD_HALT,
+                f"Daily drawdown {daily_dd:.2%} <= -{self.daily_dd_halt:.0%} threshold",
+            )
+
+        # Soft: daily DD > reduce threshold → halve size via caller
+        # Return None here; the caller (validate_signal loop) can't apply a
+        # halve without a concrete signal.  Instead we return a special approved
+        # decision carrying a "halve" flag in modifications so the outer loop
+        # reduces the working signal's size.
+        if daily_dd <= -self.daily_dd_reduce:
+            return RiskDecision(
+                approved        = True,
+                modified_signal = None,   # signal not yet available here
+                modifications   = [
+                    f"portfolio_dd_reduce: daily_dd={daily_dd:.2%} — sizes halved"
+                ],
+            )
+
+        return None
+
+    def check_aggregate_exposure(
+        self,
+        signal,
+        portfolio_state: PortfolioState,
+    ) -> Optional[RiskDecision]:
+        """
+        Reject or reduce when all strategies' combined gross exposure would
+        exceed ``max_aggregate_exposure`` (default 80%) of equity.
+        """
+        equity = max(portfolio_state.equity, 1e-9)
+        agg    = self.get_aggregate_positions()
+
+        current_gross = sum(abs(v) for v in agg.values()) / equity
+        proposed_add  = signal.position_size_pct  # fraction of equity
+
+        if current_gross + proposed_add <= self.max_aggregate_exposure:
+            return None
+
+        # How much room is left?
+        headroom = max(0.0, self.max_aggregate_exposure - current_gross)
+        if headroom * equity < self.min_position_usd:
+            return self._reject(
+                RejectionReason.PORTFOLIO_EXPOSURE,
+                f"Aggregate exposure {current_gross:.1%} + {proposed_add:.1%} "
+                f"> limit {self.max_aggregate_exposure:.0%} "
+                f"(strategy={signal.strategy_name})",
+            )
+
+        mod = copy.copy(signal)
+        mod.position_size_pct = round(headroom, 6)
+        return RiskDecision(
+            approved        = True,
+            modified_signal = mod,
+            modifications   = [
+                f"Aggregate exposure cap {self.max_aggregate_exposure:.0%}: "
+                f"size {proposed_add:.2%} → {headroom:.2%}"
+            ],
+        )
+
+    def check_symbol_aggregation(
+        self,
+        signal,
+        portfolio_state: PortfolioState,
+    ) -> Optional[RiskDecision]:
+        """
+        Enforce a single-symbol cap across ALL strategies combined.
+
+        If Strategy_A holds SPY at 10% and Strategy_B tries to add SPY at 8%,
+        the combined 18% would breach the 15% cap.  Strategy_B's size is
+        reduced to max(0, 15% - 10%) = 5%.
+        """
+        equity = max(portfolio_state.equity, 1e-9)
+        agg    = self.get_aggregate_positions()
+
+        current_sym_pct = abs(agg.get(signal.symbol, 0.0)) / equity
+        proposed_add    = signal.position_size_pct
+
+        if current_sym_pct + proposed_add <= self.max_single_symbol:
+            return None
+
+        headroom = max(0.0, self.max_single_symbol - current_sym_pct)
+        if headroom * equity < self.min_position_usd:
+            return self._reject(
+                RejectionReason.PORTFOLIO_SYMBOL_CAP,
+                f"{signal.symbol} cross-strategy exposure "
+                f"{current_sym_pct:.1%} + {proposed_add:.1%} "
+                f"> cap {self.max_single_symbol:.0%}",
+            )
+
+        mod = copy.copy(signal)
+        mod.position_size_pct = round(headroom, 6)
+        return RiskDecision(
+            approved        = True,
+            modified_signal = mod,
+            modifications   = [
+                f"Symbol cap {self.max_single_symbol:.0%} ({signal.symbol} "
+                f"cross-strategy): {proposed_add:.2%} → {headroom:.2%}"
+            ],
+        )
+
+    def check_total_leverage(
+        self,
+        signal,
+        portfolio_state: PortfolioState,
+    ) -> Optional[RiskDecision]:
+        """
+        Reject when the proposed position would push total portfolio leverage
+        above ``max_portfolio_leverage`` (1.25x).
+
+        leverage = (gross_exposure + new_position_dollars) / equity
+        """
+        equity = max(portfolio_state.equity, 1e-9)
+        agg    = self.get_aggregate_positions()
+
+        current_gross = sum(abs(v) for v in agg.values())
+        new_dollars   = signal.position_size_pct * equity * signal.leverage
+        prospective   = (current_gross + new_dollars) / equity
+
+        if prospective <= self.max_portfolio_leverage:
+            return None
+
+        return self._reject(
+            RejectionReason.PORTFOLIO_LEVERAGE,
+            f"Portfolio leverage {prospective:.2f}x > limit "
+            f"{self.max_portfolio_leverage:.2f}x "
+            f"(adding {signal.symbol} {signal.leverage:.2f}x from "
+            f"{signal.strategy_name})",
+        )
+
+    def check_correlation_cluster(
+        self,
+        signal,
+        portfolio_state: PortfolioState,
+    ) -> Optional[RiskDecision]:
+        """
+        Block additions to a correlated cluster whose combined exposure already
+        exceeds ``max_corr_cluster`` (default 30%).
+
+        A "cluster" is the set of all held symbols (across strategies) whose
+        60-day rolling correlation with ``signal.symbol`` exceeds
+        ``corr_cluster_threshold`` (default 0.70), plus the symbol itself.
+        """
+        ph = portfolio_state.price_history
+        if not ph or signal.symbol not in ph:
+            return None
+
+        equity = max(portfolio_state.equity, 1e-9)
+        agg    = self.get_aggregate_positions()
+
+        new_series = ph[signal.symbol].dropna()
+        if len(new_series) < self.correlation_window:
+            return None
+
+        cluster_exposure = abs(agg.get(signal.symbol, 0.0))   # symbol itself
+
+        for held_sym, held_val in agg.items():
+            if held_sym == signal.symbol:
+                continue
+            if held_sym not in ph:
+                continue
+            other = ph[held_sym].dropna()
+            aligned = pd.concat(
+                [new_series.rename("a"), other.rename("b")], axis=1
+            ).dropna().tail(self.correlation_window)
+            if len(aligned) < 20:
+                continue
+            corr = float(aligned["a"].corr(aligned["b"]))
+            if not np.isnan(corr) and corr >= self.corr_cluster_threshold:
+                cluster_exposure += abs(held_val)
+
+        cluster_pct = cluster_exposure / equity
+        proposed    = signal.position_size_pct
+
+        if cluster_pct + proposed > self.max_corr_cluster:
+            return self._reject(
+                RejectionReason.PORTFOLIO_CORR_CLUSTER,
+                f"{signal.symbol} correlated-cluster exposure "
+                f"{cluster_pct:.1%} + {proposed:.1%} "
+                f"> cap {self.max_corr_cluster:.0%}",
+            )
+
+        return None
+
+    # ── Private helpers ────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _reject(reason: RejectionReason, detail: str) -> RiskDecision:
+        return RiskDecision(
+            approved         = False,
+            modified_signal  = None,
+            rejection_reason = f"{reason.value}: {detail}",
+        )
+
+    # ── Factory ────────────────────────────────────────────────────────────────
+
+    @classmethod
+    def from_config(
+        cls,
+        config: dict,
+        initial_equity: float = 100_000.0,
+    ) -> "PortfolioRiskManager":
+        """Build from the ``risk`` section of settings.yaml."""
+        r = config.get("risk", {})
+        return cls(
+            max_aggregate_exposure = float(r.get("max_exposure",        0.80)),
+            max_single_symbol      = float(r.get("max_single_position", 0.15)),
+            max_portfolio_leverage = float(r.get("max_leverage",        1.25)),
+            max_corr_cluster       = float(r.get("max_correlated_exposure", 0.30)),
+            daily_dd_reduce        = float(r.get("daily_dd_reduce",     0.02)),
+            daily_dd_halt          = float(r.get("daily_dd_halt",       0.03)),
+            max_dd_from_peak       = float(r.get("max_dd_from_peak",    0.10)),
         )

@@ -327,26 +327,12 @@ _WARNED_GROUPS: set = set()
 
 
 def _emit_group_warning(group) -> None:
-    """Print a loud, eye-catching warning once per group per process run."""
+    """Log a one-line warning once per group per process run."""
     warn_text = getattr(group, "warning", "") or ""
     if not warn_text or group.name in _WARNED_GROUPS:
         return
     _WARNED_GROUPS.add(group.name)
-    bar = "!" * 76
-    try:
-        console = globals().get("console") or None
-        msg = (
-            f"\n[bold red]{bar}[/bold red]\n"
-            f"[bold red]!! WARNING — asset group '{group.name}':[/bold red]\n"
-            f"[yellow]{warn_text.strip()}[/yellow]\n"
-            f"[bold red]{bar}[/bold red]\n"
-        )
-        if console is not None:
-            console.print(msg)
-        else:
-            print(msg)
-    except Exception:
-        print(f"\n{bar}\n!! WARNING — asset group '{group.name}':\n{warn_text.strip()}\n{bar}\n")
+    logger.warning("Asset group '%s': %s", group.name, warn_text.strip())
 
 
 def _resolve_symbols(config: Dict, asset_group: Optional[str], symbols_arg: Optional[str]) -> List[str]:
@@ -990,7 +976,14 @@ class TradingSession:
     startup -> main loop -> shutdown.
     """
 
-    def __init__(self, config: Dict, dry_run: bool = False) -> None:
+    def __init__(
+        self,
+        config: Dict,
+        dry_run: bool = False,
+        allocator_approach: str = "inverse_vol",
+        no_portfolio_risk: bool = False,
+        multi_strat_filter: Optional[List[str]] = None,
+    ) -> None:
         self.config  = config
         self.dry_run = dry_run
         self.console = _console()
@@ -1015,6 +1008,21 @@ class TradingSession:
         self._snapshot:        Optional[Dict] = None
         self._last_regime:     str            = "UNKNOWN"
         self._price_history:   Dict[str, pd.Series] = {}  # for risk manager
+
+        # Multi-strategy state (populated in startup() when ≥2 strategies enabled)
+        self._multi_strat_mode:    bool               = False
+        self._strat_orchestrators: Dict[str, object]  = {}
+        self._strat_risk_managers: Dict[str, object]  = {}
+        self._strat_symbols:       Dict[str, List[str]] = {}
+        self.strategy_registry                         = None
+        self.capital_allocator                         = None
+        self.portfolio_rm                              = None
+        self._alloc_weights:       Dict[str, float]   = {}
+        self._bars_since_alloc:    int                 = 0
+        self._alloc_interval_bars: int                 = 5   # weekly ≈ 5 trading days
+        self._no_portfolio_risk:   bool                = no_portfolio_risk
+        self._allocator_approach:  str                 = allocator_approach
+        self._multi_strat_filter:  Optional[List[str]] = multi_strat_filter
 
     # ======================================================================= #
     # Startup                                                                  #
@@ -1115,6 +1123,16 @@ class TradingSession:
             console, style="dim",
         )
 
+        # TradeLogger must exist before step 5 (set_context is called after
+        # position sync). AlertManager and Dashboard are created later, after
+        # port_snapshot is available.
+        from monitoring.logger import TradeLogger
+        self.trade_logger = TradeLogger(
+            log_dir   = monitor_cfg.get("log_dir", "logs/"),
+            log_level = monitor_cfg.get("log_level", "INFO"),
+        )
+        self.trade_logger.setup()
+
         # ── 5. Position tracker ───────────────────────────────────────────────
         _print("\n[5/7] Syncing positions ...", console)
         from broker.position_tracker import PositionTracker
@@ -1163,16 +1181,97 @@ class TradingSession:
         self.position_tracker.start_stream()
         _print("      TradingStream (fills) active.", console, style="dim")
 
+        # ── 8. Multi-strategy setup (when ≥2 strategies enabled in yaml) ──────
+        _strat_cfgs = self.config.get("strategies", {}) or {}
+        _enabled_strats = {
+            name: cfg for name, cfg in _strat_cfgs.items()
+            if cfg.get("enabled", True)
+            and (self._multi_strat_filter is None or name in self._multi_strat_filter)
+        }
+        if len(_enabled_strats) >= 2:
+            self._multi_strat_mode = True
+            _print(
+                f"\n[8/8] Multi-strategy mode — strategies: {list(_enabled_strats.keys())}",
+                console,
+            )
+            from core.strategy_registry import StrategyRegistry
+            from core.capital_allocator import CapitalAllocator
+            from core.risk_manager import PortfolioRiskManager as _PRM
+            from core.regime_strategies import StrategyOrchestrator
+            from core.risk_manager import RiskManager
+            from backtest.multi_strategy_backtester import _BacktestProxy
+
+            registry = StrategyRegistry.instance()
+            per_strat_equity = equity / len(_enabled_strats)
+            risk_cfg = self.config.get("risk", {})
+
+            for sname, scfg in _enabled_strats.items():
+                syms = scfg.get("symbols") or symbols
+                self._strat_symbols[sname] = syms
+
+                orch = StrategyOrchestrator(
+                    config              = self.config,
+                    regime_infos        = self.hmm_engine.get_all_regime_info(),
+                    min_confidence      = hmm_cfg.get("min_confidence", 0.55),
+                    rebalance_threshold = self.config.get("strategy", {}).get(
+                        "rebalance_threshold", 0.10
+                    ),
+                )
+                rm = RiskManager(
+                    initial_equity          = per_strat_equity,
+                    max_risk_per_trade      = risk_cfg.get("max_risk_per_trade",   0.01),
+                    max_exposure            = risk_cfg.get("max_exposure",         0.80),
+                    max_leverage            = risk_cfg.get("max_leverage",         1.25),
+                    max_single_position     = risk_cfg.get("max_single_position",  0.15),
+                    max_concurrent          = risk_cfg.get("max_concurrent",       5),
+                    max_daily_trades        = risk_cfg.get("max_daily_trades",     20),
+                    daily_dd_reduce         = risk_cfg.get("daily_dd_reduce",      0.02),
+                    daily_dd_halt           = risk_cfg.get("daily_dd_halt",        0.03),
+                    weekly_dd_reduce        = risk_cfg.get("weekly_dd_reduce",     0.05),
+                    weekly_dd_halt          = risk_cfg.get("weekly_dd_halt",       0.07),
+                    max_dd_from_peak        = risk_cfg.get("max_dd_from_peak",     0.10),
+                    allow_fractional_shares = bool(risk_cfg.get("allow_fractional_shares", False)),
+                    fractional_precision    = int(risk_cfg.get("fractional_precision", 6)),
+                )
+                self._strat_orchestrators[sname] = orch
+                self._strat_risk_managers[sname]  = rm
+
+                proxy = _BacktestProxy(sname, total_alloc=0.90)
+                proxy.allocated_capital = per_strat_equity
+                registry.register(sname, proxy)
+
+            self.strategy_registry = registry
+            self.capital_allocator = CapitalAllocator(
+                approach            = self._allocator_approach,
+                strategy_configs    = _enabled_strats,
+                total_capital       = equity,
+            )
+            if not self._no_portfolio_risk:
+                self.portfolio_rm = _PRM(
+                    max_aggregate_exposure = risk_cfg.get("max_exposure",        0.80),
+                    max_single_symbol      = risk_cfg.get("max_single_position", 0.15),
+                    max_portfolio_leverage = risk_cfg.get("max_leverage",        1.25),
+                    daily_dd_halt          = risk_cfg.get("daily_dd_halt",       0.03),
+                    max_dd_from_peak       = risk_cfg.get("max_dd_from_peak",    0.10),
+                )
+
+            # Initial allocation pass
+            self._alloc_weights = self.capital_allocator.allocate(registry)
+            for sname, w in self._alloc_weights.items():
+                p = registry.get(sname)
+                if p is not None:
+                    p.allocated_capital = w * equity
+
+            _print(
+                f"      Allocator ready  approach={self._allocator_approach}  "
+                f"weights={{{', '.join(f'{k}:{v:.2f}' for k,v in self._alloc_weights.items())}}}",
+                console, style="dim",
+            )
+
         # ── Monitoring ────────────────────────────────────────────────────────
-        from monitoring.logger import TradeLogger
+        # TradeLogger is already constructed above (before position sync).
         from monitoring.alerts import AlertManager
         from monitoring.dashboard import Dashboard
-
-        self.trade_logger = TradeLogger(
-            log_dir   = monitor_cfg.get("log_dir", "logs/"),
-            log_level = monitor_cfg.get("log_level", "INFO"),
-        )
-        self.trade_logger.setup()
 
         self.alert_manager = AlertManager(
             rate_limit_minutes = monitor_cfg.get("alert_rate_limit_minutes", 15),
@@ -1474,20 +1573,43 @@ class TradingSession:
                     self._price_history[sym] = sym_bars["close"].tail(60)
 
             # ---- 6. Generate signals -----------------------------------------
-            try:
-                # Sync current weights for rebalance filter
-                self.strategy.update_weights(self.position_tracker.get_current_weights())
-
-                raw_signals = self.strategy.generate_signals(
-                    symbols       = symbols,
-                    bars          = bars_by_symbol,
-                    regime_state  = regime_state,
-                    is_flickering = is_flickering,
-                )
-            except Exception as exc:
-                logger.error("Strategy signal generation failed: %s", exc)
-                self.trade_logger.log_error(exc, context="signal_generation")
-                raw_signals = []
+            if self._multi_strat_mode:
+                # Multi-strategy: per-strategy signal generation
+                _raw_by_strat: Dict[str, list] = {}
+                for _sname, _orch in self._strat_orchestrators.items():
+                    _proxy = self.strategy_registry.get(_sname)
+                    if _proxy is not None and not getattr(_proxy, "is_enabled", True):
+                        continue
+                    _syms = self._strat_symbols.get(_sname, symbols)
+                    _sbars = {s: bars_by_symbol[s] for s in _syms if s in bars_by_symbol}
+                    if not _sbars:
+                        continue
+                    try:
+                        _orch.update_weights(self.position_tracker.get_current_weights())
+                        _raw_by_strat[_sname] = _orch.generate_signals(
+                            symbols       = list(_sbars.keys()),
+                            bars          = _sbars,
+                            regime_state  = regime_state,
+                            is_flickering = is_flickering,
+                        )
+                    except Exception as exc:
+                        logger.error("Strategy '%s' signal gen failed: %s", _sname, exc)
+                        _raw_by_strat[_sname] = []
+                raw_signals = []   # unused in multi-strat path below
+            else:
+                # Single-strategy (existing behavior)
+                try:
+                    self.strategy.update_weights(self.position_tracker.get_current_weights())
+                    raw_signals = self.strategy.generate_signals(
+                        symbols       = symbols,
+                        bars          = bars_by_symbol,
+                        regime_state  = regime_state,
+                        is_flickering = is_flickering,
+                    )
+                except Exception as exc:
+                    logger.error("Strategy signal generation failed: %s", exc)
+                    self.trade_logger.log_error(exc, context="signal_generation")
+                    raw_signals = []
 
             # ---- 7. Risk gate + order submission ----------------------------
             _port_snap_now = self.position_tracker.get_last_snapshot()
@@ -1497,105 +1619,163 @@ class TradingSession:
             }
 
             from core.risk_manager import PortfolioState, TradingState
-            portfolio_state = PortfolioState(
-                equity          = self.risk_manager._current_equity,
-                cash            = self.client.get_cash(),
-                buying_power    = self.client.get_buying_power(),
-                positions       = positions_dict,
-                current_regime  = self._last_regime,
-                price_history   = self._price_history,
-            )
 
-            for signal in raw_signals:
-                if not signal.is_long:
-                    continue
-
-                decision = self.risk_manager.validate_signal(
-                    signal          = signal,
-                    portfolio_state = portfolio_state,
-                )
-
-                if not decision.approved:
-                    logger.info(
-                        "Signal REJECTED: %s  reason=%s",
-                        signal.symbol, decision.rejection_reason,
-                    )
-                    self.trade_logger.log_risk_event(
-                        event_type  = "rejected",
-                        description = f"{signal.symbol}: {decision.rejection_reason}",
-                        severity    = "WARNING",
-                    )
-                    self.dashboard.update(
-                        event=f"REJECTED {signal.symbol}: {decision.rejection_reason}"
-                    )
-                    continue
-
-                final_signal = decision.modified_signal
-                if decision.modifications:
-                    logger.info(
-                        "Signal MODIFIED: %s  changes=%s",
-                        signal.symbol, decision.modifications,
-                    )
-
-                # Log the trade intent
+            def _submit_one(final_signal, strategy_label: str = "") -> None:
+                """Log + optionally submit one approved signal."""
                 self.trade_logger.log_trade(
-                    symbol   = final_signal.symbol,
-                    side     = "buy" if final_signal.is_long else "sell",
-                    qty      = 0,   # actual qty determined by executor
-                    price    = final_signal.entry_price,
-                    extra    = {
-                        "regime":  regime_state.label,
-                        "dry_run": self.dry_run,
+                    symbol = final_signal.symbol,
+                    side   = "buy" if final_signal.is_long else "sell",
+                    qty    = 0,
+                    price  = final_signal.entry_price,
+                    extra  = {
+                        "regime":   regime_state.label,
+                        "dry_run":  self.dry_run,
                         "size_pct": round(final_signal.position_size_pct, 4),
+                        "strategy": strategy_label,
                     },
                 )
-
                 if self.dry_run:
                     _print(
                         f"  [DRY RUN] Would submit: {final_signal.symbol}  "
                         f"size={final_signal.position_size_pct:.1%}  "
-                        f"stop={final_signal.stop_loss:.2f}",
+                        f"stop={final_signal.stop_loss:.2f}"
+                        + (f"  [{strategy_label}]" if strategy_label else ""),
                         self.console, style="dim",
                     )
-                    continue
-
-                # Submit with retry
-                result = None
-                for attempt in range(1, 4):
+                    return
+                _res = None
+                for _attempt in range(1, 4):
                     try:
-                        result = executor.submit_order(final_signal)
+                        _res = executor.submit_order(final_signal)
                         break
-                    except Exception as exc:
+                    except Exception as _exc:
                         logger.warning(
                             "Order submission attempt %d/3 failed for %s: %s",
-                            attempt, final_signal.symbol, exc,
+                            _attempt, final_signal.symbol, _exc,
                         )
-                        if attempt < 3:
-                            time.sleep(2 ** attempt)
-
-                if result is None:
+                        if _attempt < 3:
+                            time.sleep(2 ** _attempt)
+                if _res is None:
                     self.alert_manager.alert_order_error(
-                        final_signal.symbol,
-                        "All 3 submission attempts failed",
+                        final_signal.symbol, "All 3 submission attempts failed"
                     )
-                    continue
-
+                    return
                 from broker.order_executor import OrderStatus
-                if result.status == OrderStatus.REJECTED:
+                if _res.status == OrderStatus.REJECTED:
                     self.alert_manager.alert_order_error(
-                        final_signal.symbol,
-                        result.error_message or "REJECTED by broker",
+                        final_signal.symbol, _res.error_message or "REJECTED by broker"
                     )
                     self.dashboard.update(
-                        event=f"Order REJECTED {final_signal.symbol}: {result.error_message}"
+                        event=f"Order REJECTED {final_signal.symbol}: {_res.error_message}"
                     )
                 else:
                     self.dashboard.update(
                         event=(
                             f"Order submitted: BUY {final_signal.symbol}  "
                             f"regime={regime_state.label}"
+                            + (f"  [{strategy_label}]" if strategy_label else "")
                         )
                     )
+
+            if self._multi_strat_mode:
+                # Multi-strategy risk gate: per-strategy RM → PRM → executor
+                _total_equity = self.risk_manager._current_equity
+                for _sname, _sigs in _raw_by_strat.items():
+                    _srm = self._strat_risk_managers[_sname]
+                    _proxy = self.strategy_registry.get(_sname)
+                    _strat_eq = getattr(_proxy, "allocated_capital", _total_equity)
+                    _strat_ps = PortfolioState(
+                        equity         = _strat_eq,
+                        cash           = self.client.get_cash(),
+                        buying_power   = self.client.get_buying_power(),
+                        positions      = positions_dict,
+                        current_regime = self._last_regime,
+                        price_history  = self._price_history,
+                    )
+                    for signal in _sigs:
+                        if not signal.is_long:
+                            continue
+                        _dec = _srm.validate_signal(signal, _strat_ps)
+                        if not _dec.approved:
+                            logger.info(
+                                "[%s] Signal REJECTED: %s  reason=%s",
+                                _sname, signal.symbol, _dec.rejection_reason,
+                            )
+                            self.dashboard.update(
+                                event=f"[{_sname}] REJECTED {signal.symbol}: {_dec.rejection_reason}"
+                            )
+                            continue
+                        _approved = _dec.modified_signal
+
+                        # Portfolio-level risk gate
+                        if self.portfolio_rm is not None:
+                            _port_ps = PortfolioState(
+                                equity         = _total_equity,
+                                cash           = self.client.get_cash(),
+                                buying_power   = self.client.get_buying_power(),
+                                positions      = positions_dict,
+                                current_regime = self._last_regime,
+                                price_history  = self._price_history,
+                            )
+                            _pdec = self.portfolio_rm.validate_signal(
+                                _approved, _sname, _port_ps
+                            )
+                            if not _pdec.approved:
+                                logger.info(
+                                    "[PRM] Signal REJECTED: %s  reason=%s",
+                                    _approved.symbol, _pdec.rejection_reason,
+                                )
+                                self.dashboard.update(
+                                    event=f"[PRM] REJECTED {_approved.symbol}: {_pdec.rejection_reason}"
+                                )
+                                continue
+                            _approved = _pdec.modified_signal
+
+                        _submit_one(_approved, strategy_label=_sname)
+
+            else:
+                # Single-strategy risk gate (original behavior)
+                portfolio_state = PortfolioState(
+                    equity          = self.risk_manager._current_equity,
+                    cash            = self.client.get_cash(),
+                    buying_power    = self.client.get_buying_power(),
+                    positions       = positions_dict,
+                    current_regime  = self._last_regime,
+                    price_history   = self._price_history,
+                )
+
+                for signal in raw_signals:
+                    if not signal.is_long:
+                        continue
+
+                    decision = self.risk_manager.validate_signal(
+                        signal          = signal,
+                        portfolio_state = portfolio_state,
+                    )
+
+                    if not decision.approved:
+                        logger.info(
+                            "Signal REJECTED: %s  reason=%s",
+                            signal.symbol, decision.rejection_reason,
+                        )
+                        self.trade_logger.log_risk_event(
+                            event_type  = "rejected",
+                            description = f"{signal.symbol}: {decision.rejection_reason}",
+                            severity    = "WARNING",
+                        )
+                        self.dashboard.update(
+                            event=f"REJECTED {signal.symbol}: {decision.rejection_reason}"
+                        )
+                        continue
+
+                    final_signal = decision.modified_signal
+                    if decision.modifications:
+                        logger.info(
+                            "Signal MODIFIED: %s  changes=%s",
+                            signal.symbol, decision.modifications,
+                        )
+
+                    _submit_one(final_signal)
 
             # ---- 8. Update trailing stops ------------------------------------
             if not self.dry_run:
@@ -1618,7 +1798,97 @@ class TradingSession:
                     event=f"[red]HALT: peak DD {dd.dd_from_peak:.2%}[/red]"
                 )
 
-            # ---- 10. Dashboard refresh & position update --------------------
+            # ---- 10. Multi-strategy health checks + allocator rebalance ---------
+            if self._multi_strat_mode and self.strategy_registry is not None:
+                _pre_enabled = {
+                    n: getattr(s, "is_enabled", True)
+                    for n, s in self.strategy_registry.all().items()
+                }
+                self.strategy_registry.run_health_checks()
+                for _sn, _was in _pre_enabled.items():
+                    _s = self.strategy_registry.get(_sn)
+                    if _was and _s is not None and not getattr(_s, "is_enabled", True):
+                        _reason = "health check failed"
+                        _hc = getattr(_s, "_last_health", None)
+                        if _hc is not None:
+                            _reason = getattr(_hc, "reason_if_unhealthy", _reason) or _reason
+                        self.alert_manager.alert_strategy_disabled(_sn, _reason)
+                        self.dashboard.update(event=f"[{_sn}] auto-disabled: {_reason}")
+
+                # Correlation cluster detection (pair > 0.80)
+                try:
+                    _hist = {}
+                    for _sn, _syms in self._strat_symbols.items():
+                        _p = self.strategy_registry.get(_sn)
+                        if _p is None or not getattr(_p, "is_enabled", True):
+                            continue
+                        _series = [
+                            self._price_history[_s].pct_change().dropna()
+                            for _s in _syms if _s in self._price_history
+                        ]
+                        if _series:
+                            _df = pd.concat(_series, axis=1).dropna()
+                            if len(_df) >= 20:
+                                _hist[_sn] = _df.mean(axis=1)
+                    if len(_hist) >= 2:
+                        _corr_df = pd.DataFrame(_hist).dropna().corr()
+                        _hot_pairs = []
+                        _names = list(_corr_df.columns)
+                        for _i in range(len(_names)):
+                            for _j in range(_i + 1, len(_names)):
+                                _c = float(_corr_df.iloc[_i, _j])
+                                if _c > 0.80:
+                                    _hot_pairs.append((_names[_i], _names[_j], _c))
+                        if _hot_pairs:
+                            self.alert_manager.alert_correlation_cluster(_hot_pairs)
+                except Exception as _exc:
+                    logger.debug("Correlation cluster check skipped: %s", _exc)
+
+                self._bars_since_alloc += 1
+                if self._bars_since_alloc >= self._alloc_interval_bars:
+                    self._bars_since_alloc = 0
+                    try:
+                        _cur_equity = self.risk_manager._current_equity
+                        self.capital_allocator.total_capital = _cur_equity
+                        _dd_state = self.risk_manager.get_drawdown_state()
+                        _daily_dd = max(0.0, getattr(_dd_state, "dd_today", 0.0))
+                        _prev_weights = dict(self._alloc_weights or {})
+                        self._alloc_weights = self.capital_allocator.allocate(
+                            self.strategy_registry,
+                            daily_drawdown=_daily_dd,
+                        )
+                        for _sn, _w in self._alloc_weights.items():
+                            _p = self.strategy_registry.get(_sn)
+                            if _p is not None:
+                                _p.allocated_capital = _w * _cur_equity
+                        logger.info(
+                            "Allocator rebalanced: %s",
+                            {k: f"{v:.2f}" for k, v in self._alloc_weights.items()},
+                        )
+                        _changed = any(
+                            abs(self._alloc_weights.get(_k, 0.0) - _prev_weights.get(_k, 0.0)) > 0.01
+                            for _k in set(self._alloc_weights) | set(_prev_weights)
+                        )
+                        if _changed:
+                            self.alert_manager.alert_allocator_rebalance(
+                                self._alloc_weights, trigger="scheduled"
+                            )
+                    except Exception as exc:
+                        logger.error("Allocator rebalance failed: %s", exc)
+
+                # Portfolio-level DD breaker (fires if lock file was written this bar)
+                if self.portfolio_rm is not None:
+                    from core.risk_manager import LOCK_FILE as _LOCK
+                    if _LOCK.exists() and not getattr(self, "_prm_dd_alerted", False):
+                        _risk_cfg = self.config.get("risk", {})
+                        self.alert_manager.alert_portfolio_dd_breaker(
+                            equity        = self.risk_manager._current_equity,
+                            drawdown_pct  = abs(self.risk_manager.get_drawdown_state().dd_from_peak),
+                            threshold_pct = _risk_cfg.get("max_dd_from_peak", 0.10),
+                        )
+                        self._prm_dd_alerted = True
+
+            # ---- 11. Dashboard refresh & position update --------------------
             try:
                 port_snap = self.position_tracker.update(self._last_regime)  # REST refresh
 
@@ -1655,6 +1925,19 @@ class TradingSession:
                 except Exception:
                     _clock_open = None
                 _next_bar = _next_bar_close_utc(timeframe)
+
+                # Build alloc_info for dashboard multi-strat panel
+                _alloc_info: Optional[dict] = None
+                if self._multi_strat_mode and self.strategy_registry is not None:
+                    _alloc_info = {}
+                    for _sn, _w in self._alloc_weights.items():
+                        _p = self.strategy_registry.get(_sn)
+                        _alloc_info[_sn] = {
+                            "weight":  _w,
+                            "sharpe":  getattr(_p, "_sharpe", 0.0),
+                            "healthy": getattr(_p, "is_enabled", True),
+                        }
+
                 self.dashboard.update(
                     snapshot       = port_snap,
                     signal         = portfolio_signal,
@@ -1665,6 +1948,7 @@ class TradingSession:
                     next_broker_dt = _next_bar,
                     next_hmm_dt    = self._last_retrain + dt.timedelta(days=7),
                     timeframe      = timeframe,
+                    alloc_info     = _alloc_info,
                     event          = (
                         f"Bar {self._bar_count}: {regime_state.label}  "
                         f"p={confidence:.1%}  "
@@ -1674,7 +1958,7 @@ class TradingSession:
             except Exception as exc:
                 logger.warning("Dashboard update failed: %s", exc)
 
-            # ---- 11. Weekly HMM retrain check --------------------------------
+            # ---- 12. Weekly HMM retrain check --------------------------------
             days_since = (dt.datetime.now(dt.timezone.utc) - self._last_retrain).days
             if days_since >= 7:
                 _print("Weekly HMM retrain ...", self.console, style="dim")
@@ -1826,6 +2110,128 @@ def _rebuild_strategy(config: Dict, hmm_engine) -> "StrategyOrchestrator":
 
 # ── Run modes ──────────────────────────────────────────────────────────────────
 
+def _run_multi_strat_backtest(
+    config: Dict,
+    args: argparse.Namespace,
+    prices: "pd.DataFrame",
+    console,
+    output_dir: Path,
+    initial_capital: float,
+    train_window: int,
+    test_window: int,
+    step_size: int,
+    slippage_pct: float,
+    risk_free_rate: float,
+) -> None:
+    """Execute MultiStrategyBacktester using settings.yaml[strategies] spec."""
+    from backtest import MultiStrategyBacktester, StrategySpec
+
+    strat_cfgs = config.get("strategies", {}) or {}
+    enabled = {
+        name: cfg for name, cfg in strat_cfgs.items()
+        if cfg.get("enabled", True)
+    }
+    if len(enabled) < 2:
+        _print(
+            "[red]--multi-strat requires at least 2 enabled strategies in "
+            "settings.yaml[strategies].[/red]",
+            console,
+        )
+        sys.exit(1)
+
+    hmm_cfg_raw = config.get("hmm", {})
+    hmm_base = {
+        "n_candidates":      hmm_cfg_raw.get("n_candidates", [3, 4, 5]),
+        "n_init":            hmm_cfg_raw.get("n_init", 10),
+        "min_train_bars":    hmm_cfg_raw.get("min_train_bars", 120),
+        "stability_bars":    hmm_cfg_raw.get("stability_bars", 3),
+        "flicker_window":    hmm_cfg_raw.get("flicker_window", 20),
+        "flicker_threshold": hmm_cfg_raw.get("flicker_threshold", 4),
+        "min_confidence":    hmm_cfg_raw.get("min_confidence", 0.55),
+        "extended_features": hmm_cfg_raw.get("extended_features", True),
+        "blend_exclude":     hmm_cfg_raw.get("blend_exclude", []),
+    }
+    strat_base = {"strategy": config.get("strategy", {})}
+
+    specs = []
+    for sname, scfg in enabled.items():
+        syms = scfg.get("symbols")
+        if not syms:
+            _print(f"[yellow]Strategy '{sname}' has no symbols — skipping.[/yellow]", console)
+            continue
+        # Validate all symbols exist in price data
+        missing = [s for s in syms if s not in prices.columns]
+        if missing:
+            _print(
+                f"[yellow]Strategy '{sname}' symbols {missing} not in price data — skipping.[/yellow]",
+                console,
+            )
+            continue
+        specs.append(StrategySpec(
+            name            = sname,
+            symbols         = syms,
+            hmm_config      = dict(hmm_base),
+            strategy_config = dict(strat_base),
+            weight_min      = float(scfg.get("weight_min", 0.0)),
+            weight_max      = float(scfg.get("weight_max", 1.0)),
+        ))
+
+    if len(specs) < 2:
+        _print("[red]Fewer than 2 valid strategy specs — cannot run multi-strat backtest.[/red]", console)
+        sys.exit(1)
+
+    allocator_approach = getattr(args, "allocator_approach", "inverse_vol")
+    _print(
+        f"\n[bold cyan]Multi-Strategy Walk-Forward Backtest[/bold cyan]\n"
+        f"  Strategies  : {[s.name for s in specs]}\n"
+        f"  Capital     : ${initial_capital:,.0f}\n"
+        f"  Allocator   : {allocator_approach}",
+        console,
+    )
+
+    mbt = MultiStrategyBacktester(
+        initial_capital = initial_capital,
+        train_window    = train_window,
+        test_window     = test_window,
+        step_size       = step_size,
+        slippage_pct    = slippage_pct,
+        risk_free_rate  = risk_free_rate,
+        allocator_approach = allocator_approach,
+    )
+
+    logging.getLogger("hmmlearn").setLevel(logging.ERROR)
+    logging.getLogger("core.hmm_engine").setLevel(logging.WARNING)
+
+    # Scale aggregate-exposure cap with strategy count. Default PRM cap is 0.80,
+    # designed for single-strategy use; with N fully-invested sub-portfolios the
+    # aggregate approaches 100% and every new signal gets vetoed. Cap at 1.5
+    # (50% leverage headroom) and scale with N so 2 strategies → ~1.0, 5 → 1.5.
+    prm_cap = min(1.5, 0.5 + 0.25 * len(specs))
+    try:
+        result = mbt.run(prices, specs,
+                         portfolio_rm_config={"max_aggregate_exposure": prm_cap})
+    except Exception as exc:
+        _print(f"[red]Multi-strat backtest failed:[/red] {exc}", console)
+        sys.exit(1)
+
+    _print(
+        f"\n  Folds completed : {result.metadata.get('n_folds', '?')}\n"
+        f"  Final equity    : ${result.final_equity:,.2f}",
+        console, style="dim",
+    )
+
+    # Per-strategy summary
+    for sname, attr in result.attributions.items():
+        _print(
+            f"  [{sname}]  return={attr.total_return:+.2%}  "
+            f"sharpe={attr.sharpe:.3f}  maxdd={attr.max_drawdown:.2%}",
+            console, style="dim",
+        )
+
+    mbt.save_csv_outputs(result, output_dir)
+    _print(f"\n[green]Multi-strat backtest complete.[/green]  CSVs saved to {output_dir}/", console)
+
+
 def run_backtest(config: Dict, args: argparse.Namespace) -> None:
     """
     Execute the full walk-forward backtest pipeline.
@@ -1884,6 +2290,17 @@ def run_backtest(config: Dict, args: argparse.Namespace) -> None:
         )
         sys.exit(1)
 
+    # In multi-strat mode, strategy configs may declare symbols not in the main
+    # asset group (e.g. XLU/XLP for mean_reversion). Merge them in before fetch.
+    if getattr(args, "multi_strat", False):
+        strat_syms = [
+            s
+            for cfg in (config.get("strategies") or {}).values()
+            if cfg.get("enabled", True)
+            for s in (cfg.get("symbols") or [])
+        ]
+        symbols = list(dict.fromkeys(symbols + strat_syms))  # dedup, preserve order
+
     _print("\nFetching historical data from Alpaca ...", console, style="dim")
     try:
         prices = _fetch_prices(symbols, start_date, end_date, api_key, secret_key)
@@ -1905,6 +2322,13 @@ def run_backtest(config: Dict, args: argparse.Namespace) -> None:
             console,
         )
         sys.exit(1)
+
+    # ── Multi-strategy backtest branch ────────────────────────────────────────
+    if getattr(args, "multi_strat", False):
+        _run_multi_strat_backtest(config, args, prices, console, output_dir,
+                                  initial_capital, train_window, test_window,
+                                  step_size, slippage_pct, risk_free_rate)
+        return
 
     hmm_cfg_raw = config.get("hmm", {})
     hmm_config = {
@@ -2270,14 +2694,26 @@ def run_backtest(config: Dict, args: argparse.Namespace) -> None:
     )
 
 
-def run_trading(config: Dict, dry_run: bool = False) -> None:
+def run_trading(
+    config: Dict,
+    dry_run: bool = False,
+    allocator_approach: str = "inverse_vol",
+    no_portfolio_risk: bool = False,
+    multi_strat_filter: Optional[List[str]] = None,
+) -> None:
     """
     Full live / paper trading loop.
 
     Handles SIGINT / SIGTERM for graceful shutdown.
     All unhandled exceptions are logged, state is saved, and an alert is fired.
     """
-    session = TradingSession(config, dry_run=dry_run)
+    session = TradingSession(
+        config,
+        dry_run=dry_run,
+        allocator_approach=allocator_approach,
+        no_portfolio_risk=no_portfolio_risk,
+        multi_strat_filter=multi_strat_filter,
+    )
 
     # Register shutdown signal handlers
     def _handle_signal(signum, frame):
@@ -3224,8 +3660,14 @@ def build_parser() -> argparse.ArgumentParser:
                           help=_asset_group_help())
     trade_p.add_argument("--symbols",      default=None,
                           help="Comma-separated symbols — overrides asset-group")
-    trade_p.add_argument("--set",          default=None, dest="config_set",
+    trade_p.add_argument("--set",               default=None, dest="config_set",
                           help="Config set to apply (conservative | balanced | aggressive)")
+    trade_p.add_argument("--strategies",        default=None, dest="strategy_filter",
+                          help="Comma-separated strategy names from settings.yaml[strategies]")
+    trade_p.add_argument("--allocator",         default="inverse_vol", dest="allocator_approach",
+                          help="Capital allocation approach: equal_weight | inverse_vol | risk_parity | performance_weighted")
+    trade_p.add_argument("--no-portfolio-risk", action="store_true", dest="no_portfolio_risk",
+                          help="Disable portfolio-level PortfolioRiskManager (per-strategy RM still active)")
 
     # ── backtest ──────────────────────────────────────────────────────────────
     bt_p = sub.add_parser("backtest", help="Run walk-forward backtest")
@@ -3244,10 +3686,14 @@ def build_parser() -> argparse.ArgumentParser:
                        help="Add benchmark comparison table")
     bt_p.add_argument("--enforce-stops",  action="store_true", dest="enforce_stops",
                        help="Enforce stop-loss exits during OOS simulation")
-    bt_p.add_argument("--stress-test", action="store_true", dest="stress_test",
+    bt_p.add_argument("--stress-test",  action="store_true", dest="stress_test",
                        help="Run stress scenarios after the backtest")
-    bt_p.add_argument("--set",         default=None, dest="config_set",
+    bt_p.add_argument("--set",          default=None, dest="config_set",
                        help="Config set to apply (conservative | balanced | aggressive)")
+    bt_p.add_argument("--multi-strat",  action="store_true", dest="multi_strat",
+                       help="Use MultiStrategyBacktester with strategies from settings.yaml[strategies]")
+    bt_p.add_argument("--allocator",    default="inverse_vol", dest="allocator_approach",
+                       help="Allocator approach for --multi-strat mode")
 
     # ── stress ────────────────────────────────────────────────────────────────
     stress_p = sub.add_parser("stress", help="Run stress-test scenario suite")
@@ -3391,7 +3837,15 @@ def main() -> None:
             run_train_only(config, args)
             return
 
-        run_trading(config, dry_run=getattr(args, "dry_run", False))
+        _strat_arg = getattr(args, "strategy_filter", None)
+        _strat_filter = [s.strip() for s in _strat_arg.split(",")] if _strat_arg else None
+        run_trading(
+            config,
+            dry_run             = getattr(args, "dry_run", False),
+            allocator_approach  = getattr(args, "allocator_approach", "inverse_vol"),
+            no_portfolio_risk   = getattr(args, "no_portfolio_risk", False),
+            multi_strat_filter  = _strat_filter,
+        )
 
     elif args.command == "backtest":
         run_backtest(config, args)

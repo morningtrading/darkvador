@@ -197,6 +197,11 @@ class Dashboard:
         self._asset_group:    str            = ""
         self._symbols:        List[str]      = []
 
+        # ── Multi-strategy allocation state ───────────────────────────────────
+        # {strategy_name: {"weight": float, "sharpe": float, "healthy": bool}}
+        # Special key "_reserve": {"weight": float}
+        self._alloc_info: dict = {}
+
         # ── Countdown targets (UTC-aware datetimes) ───────────────────────────
         self._next_bar_dt:    Optional[dt.datetime] = None
         self._next_broker_dt: Optional[dt.datetime] = None
@@ -250,6 +255,7 @@ class Dashboard:
         timeframe:       Optional[str]               = None,
         asset_group:     Optional[str]               = None,
         symbols:         Optional[List[str]]         = None,
+        alloc_info:      Optional[dict]              = None,
     ) -> None:
         """
         Push new data to the dashboard from any thread.
@@ -286,6 +292,7 @@ class Dashboard:
             if timeframe      is not None: self._timeframe      = timeframe
             if asset_group    is not None: self._asset_group    = asset_group
             if symbols        is not None: self._symbols        = symbols
+            if alloc_info     is not None: self._alloc_info     = alloc_info
             if event is not None:
                 ts = dt.datetime.now().strftime("%H:%M:%S")
                 self._recent_events.appendleft(f"[dim]{ts}[/dim]  {event}")
@@ -335,6 +342,8 @@ class Dashboard:
             self._render_positions(snap))
         layout["recent_signals"].update(
             self._render_signal_log(signals))
+        layout["allocations"].update(
+            self._render_allocations())
         layout["risk_status"].update(
             self._render_risk_status(dd))
         layout["system"].update(
@@ -597,6 +606,69 @@ class Dashboard:
         )
         return Panel(body, title="[bold]System[/bold]", padding=(0, 1))
 
+    # ── Multi-strategy allocations ────────────────────────────────────────────
+
+    def _render_allocations(self) -> Panel:
+        """
+        Render the multi-strategy allocations panel.
+
+        Shows per-strategy weight, Sharpe, and health status.
+        Hidden (minimal placeholder) when no alloc_info is set.
+        """
+        info = self._alloc_info
+        if not info:
+            return Panel(
+                "[dim]Single-strategy mode[/dim]",
+                title="[bold]Allocations[/bold]",
+                padding=(0, 1),
+            )
+
+        table = Table.grid(padding=(0, 2))
+        table.add_column("name",   no_wrap=True, min_width=18)
+        table.add_column("weight", no_wrap=True, min_width=7, justify="right")
+        table.add_column("sharpe", no_wrap=True, min_width=10)
+        table.add_column("health", no_wrap=True, min_width=12)
+
+        for name, entry in info.items():
+            if name == "_reserve":
+                table.add_row(
+                    Text("Cash Reserve", style="dim"),
+                    Text(f"{entry.get('weight', 0):.0%}", style="dim"),
+                    Text("", style=""),
+                    Text("", style=""),
+                )
+                continue
+
+            weight  = entry.get("weight", 0.0)
+            sharpe  = entry.get("sharpe", None)
+            healthy = entry.get("healthy", True)
+
+            name_style   = "bold" if healthy else "dim"
+            weight_style = "green" if weight >= 0.20 else ("yellow" if weight > 0 else "dim")
+
+            if sharpe is None:
+                sharpe_text = Text("--", style="dim")
+            elif sharpe >= 0.5:
+                sharpe_text = Text(f"Sharpe {sharpe:+.1f}", style="green")
+            elif sharpe >= 0.0:
+                sharpe_text = Text(f"Sharpe {sharpe:+.1f}", style="yellow")
+            else:
+                sharpe_text = Text(f"Sharpe {sharpe:+.1f}", style="red")
+
+            if healthy:
+                health_text = Text("Healthy ✅", style="green")
+            else:
+                health_text = Text("Disabled ⚠️", style="red")
+
+            table.add_row(
+                Text(name, style=name_style),
+                Text(f"{weight:.0%}", style=weight_style),
+                sharpe_text,
+                health_text,
+            )
+
+        return Panel(table, title="[bold]Multi-Strat Allocations[/bold]", padding=(0, 1))
+
     # ── Countdowns ────────────────────────────────────────────────────────────
 
     def _render_countdowns(self) -> Panel:
@@ -666,6 +738,7 @@ class Dashboard:
             Layout(name="portfolio",      size=5),
             Layout(name="positions",      minimum_size=5),
             Layout(name="recent_signals", size=8),
+            Layout(name="allocations",    size=6),
             Layout(name="risk_status",    size=5),
             Layout(name="system",         size=4),
             Layout(name="countdowns",     size=3),

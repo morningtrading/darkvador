@@ -1,64 +1,57 @@
-# Asset groups live in config/asset_groups.yaml.
-# Manage them with: py -3.12 main.py groups <list|add|remove|edit|...>
-
 broker:
   paper_trading: true
-  asset_group: stocks
+  asset_group: null
   symbols:
   - SPY
   - QQQ
   - AAPL
   - MSFT
-  - AMZN
-  - GOOGL
   - NVDA
-  - META
-  - TSLA
-  - AMD
   timeframe: 5Min
   base_url_paper: https://paper-api.alpaca.markets
   base_url_live: https://api.alpaca.markets
   data_feed: iex
 hmm:
   n_candidates:
-  - 5            # fixed at 5 → always CRASH/BEAR/NEUTRAL/BULL/EUPHORIA, no BIC variance across machines
+  - 5
   n_init: 10
   covariance_type: full
-  min_train_bars: 252  # must match backtest.train_window. Previous: 126, 63
-  stability_bars: 5              # cs-sweep validated optimum for indices
+  min_train_bars: 252
+  stability_bars: 12
   flicker_window: 20
-  flicker_threshold: 2
-  min_confidence: 0.68           # joint optimum: interval+cs sweeps on indices 2020-2026
-  extended_features: true   # true (default): adds vol_ratio, adx_14, dist_sma200 — set false to revert to base only
-  use_vix_features: true     # adds vix_zscore_60 cross-asset feature (fetches ^VIX daily via yfinance, VXX fallback). Indices: Sharpe 0.263 -> 0.446, MaxDD -31% -> -23%
-  use_credit_spread_features: false  # adds credit_spread_z60 = z-score(HYG/LQD ratio). Indices test: redundant with VIX_zscore (stacking hurts 0.446 -> 0.350); alone on EXT marginal (+0.024 Sharpe). Kept as opt-in.
-  regime_proxy: QQQ         # symbol used ONLY for HMM feature calibration. Blank = blend across all equity symbols (default). Set e.g. "QQQ" to anchor regime detection on a single proxy while trading the full portfolio.
+  flicker_threshold: 4
+  min_confidence: 0.62
+  extended_features: true
+  use_vix_features: true
+  use_credit_spread_features: false
+  regime_proxy: QQQ
   features:
   - log_ret_1
   - realized_vol_20
-  blend_exclude:           # symbols excluded from log_ret_1 / realized_vol_20 feature blending.
-  - GLD                    # HMM features are blended only across US equity ETFs (SPY, QQQ, DIA, IWM).
-  - VNQ                    # Non-equity / international assets (gold, real estate, EM, EAFE) are held
-  - EFA                    # in the portfolio for diversification but excluded from regime calibration:
-  - EEM                    # their vol/return dynamics differ too much from US equity and would add
-  - EWG                    # cross-asset noise that blurs the BULL/BEAR/CRASH regime signal.
+  blend_exclude:
+  - GLD
+  - VNQ
+  - EFA
+  - EEM
+  - EWG
 strategy:
   low_vol_allocation: 0.95
   mid_vol_allocation_trend: 0.95
-  mid_vol_allocation_no_trend: 0.75
-  high_vol_allocation: 0.75
+  mid_vol_allocation_no_trend: 0.70
+  high_vol_allocation: 0.60
   low_vol_leverage: 1.25
-  rebalance_threshold: 0.15
+  rebalance_threshold: 0.18
   uncertainty_size_mult: 0.5
   trend_lookback: 50
   trend_min_slope: 0.0
-  sma_hard_gate: false  # force flat when market proxy < SMA200. Tested: degrades indices Sharpe 0.446 -> 0.273 (double-filter kills signal). Kept as opt-in tool.
-  sma_soft_mult: 1.0    # 1.0 = disabled. Sweep on indices: 0.7 → Sharpe 0.442 / MaxDD -19.5%; 0.5 → Sharpe 0.425 / MaxDD -17.3%; 1.0 → Sharpe 0.446 / MaxDD -22.9%. Keep off by default; opt-in for drawdown-sensitive users.
-  vol_target_annual: 0.0   # scale LONG sizes to realize this annualized vol. 0 = disabled. Tested: 0.10/0.12 hurt Sharpe (risk-free 4.5% eats excess return when vol compressed). Opt-in sweep: 0.06-0.08 might help (not yet tested).
+  sma_hard_gate: false
+  sma_soft_mult: 1.0
+  vol_target_annual: 0.0
   vol_target_min_mult: 0.25
-  vol_target_max_mult: 1.50
+  vol_target_max_mult: 1.5
   vol_target_window: 20
-  sma_blend_weight: 1.0  # HMM <-> SMA ensemble. 1.0 = pure HMM (default). 0.0 = pure SMA-200 EW. Blend: size_i = w*hmm_size + (1-w)*sma_ew_weight. Tests TBD on indices.
+  sma_blend_weight: 1.0
+  skip_neutral_regime: true
 risk:
   max_risk_per_trade: 0.01
   max_single_position: 0.15
@@ -71,26 +64,68 @@ risk:
   weekly_dd_reduce: 0.05
   weekly_dd_halt: 0.07
   max_dd_from_peak: 0.1
-  allow_fractional_shares: false   # Alpaca supports fractional equities + crypto. Set true to avoid capital idling due to whole-share rounding.
-  fractional_precision: 6          # decimal places when fractional shares are enabled
+  allow_fractional_shares: false
+  fractional_precision: 6
 backtest:
   initial_capital: 100000
   slippage_pct: 0.0005
-  min_rebalance_interval: 0   # 0 = off; set to N to lock out rebalances for N bars after each one
-  train_window: 252  # IS bars — 12 months daily. Previous options: 63 (3m), 126 (6m)
-  test_window: 63    # OOS bars — 3 months daily. Previous options: 42 (2m), 126 (6m)
-  step_size: 63      # Step bars — must be ≤ test_window for contiguous OOS coverage. Previous: 126 (created 63-bar gaps, missing bull runs)
+  min_rebalance_interval: 5
+  train_window: 252
+  test_window: 63
+  step_size: 63
   risk_free_rate: 0.045
   benchmark_symbol: SPY
   commission_per_share: 0.0
   min_commission: 0.0
-  # Benchmark overlay parameters (also used by strategy SMA gates)
-  sma_long: 200        # SMA window for trend benchmark / gate (daily bars on indices; scale for 5Min)
-  ema_fast: 9          # EMA crossover fast period
-  ema_slow: 45         # EMA crossover slow period
+  sma_long: 200
+  ema_fast: 9
+  ema_slow: 45
 monitoring:
   dashboard_refresh_seconds: 5
   alert_rate_limit_minutes: 15
   log_level: INFO
   log_dir: logs/
   log_rotation_mb: 50
+strategies:
+  hmm_regime:
+    enabled: true
+    symbols:
+    - SPY
+    weight_min: 0.1
+    weight_max: 0.5
+  momentum_breakout:
+    enabled: false
+    symbols:
+    - AAPL
+    - NVDA
+    - TSLA
+    weight_min: 0.05
+    weight_max: 0.3
+  mean_reversion:
+    enabled: false
+    symbols:
+    - XLU
+    - XLP
+    weight_min: 0.05
+    weight_max: 0.25
+  bond_trend:
+    enabled: false
+    symbols:
+    - TLT
+    - IEF
+    weight_min: 0.05
+    weight_max: 0.3
+  commodity_momentum:
+    enabled: false
+    symbols:
+    - GLD
+    - USO
+    weight_min: 0.05
+    weight_max: 0.3
+  crypto_momentum:
+    enabled: false
+    symbols:
+    - BTC/USD
+    - ETH/USD
+    weight_min: 0.05
+    weight_max: 0.30
