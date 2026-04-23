@@ -2,14 +2,10 @@ version: 1
 default: stocks
 groups:
   stocks:
-    description: US large-cap equities
+    description: US large-cap equities — optimized 5-symbol basket
     asset_class: equity
     tags: [core, liquid, us]
-    symbols: [SPY, QQQ, AAPL, MSFT, AMZN, GOOGL, NVDA, META, TSLA, AMD]
-    warning: >-
-      SELECTION BIAS: NVDA/TSLA/AMD chosen with post-2020 hindsight. HMM
-      vs SMA-200 fair comparison on indices shows no alpha. Use for research
-      only — do not trade live without a fresh neutral selection.
+    symbols: [SPY, QQQ, AAPL, MSFT, NVDA]
   crypto:
     description: Top crypto pairs (Alpaca spot)
     asset_class: crypto

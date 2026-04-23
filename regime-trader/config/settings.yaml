@@ -1,6 +1,6 @@
 broker:
   paper_trading: true
-  asset_group: null
+  asset_group: stocks
   symbols:
   - SPY
   - QQQ
