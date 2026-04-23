@@ -29,10 +29,10 @@ Supporting layer runs in parallel:
 ## Multi-Strategy Mode
 
 The system can run several strategies in parallel under a single capital
-allocator and a portfolio-level risk manager. Use it when you want regime-
-based allocation (`hmm_regime`) to coexist with momentum, mean-reversion,
-bond, and commodity sleeves, each sized by its own contribution to portfolio
-risk and gated by an aggregate exposure cap.
+allocator and a portfolio-level risk manager. **Active strategies:** `hmm_regime`
+(S&P 500 regime detection) and `momentum_breakout` (large-cap tech). Other
+strategy implementations (mean-reversion, bond, commodity) are disabled by
+default as they underperform the current equity-focused universe.
 
 ```
 StrategyRegistry  ─►  CapitalAllocator  ─►  PortfolioRiskManager  ─►  Broker
