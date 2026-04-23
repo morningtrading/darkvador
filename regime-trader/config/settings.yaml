@@ -1,19 +1,12 @@
 broker:
   paper_trading: true
-  asset_group: stocks
+  asset_group: null
   symbols:
   - SPY
   - QQQ
   - AAPL
   - MSFT
-  - AMZN
-  - GOOGL
   - NVDA
-  - META
-  - TSLA
-  - AMD
-  - BTC/USD
-  - ETH/USD
   timeframe: 5Min
   base_url_paper: https://paper-api.alpaca.markets
   base_url_live: https://api.alpaca.markets
