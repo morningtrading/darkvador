@@ -465,21 +465,30 @@ def _print_comparison_table(
     ema_slow: int = 45,
 ) -> None:
     """Print a side-by-side benchmark comparison table."""
+    # (label, attr_key, format_str, higher_is_better)
     rows = [
-        ("Total Return",     "total_return",    "{:+.2%}"),
-        ("CAGR",             "cagr",            "{:+.2%}"),
-        ("Sharpe Ratio",     "sharpe_ratio",    "{:.3f}"),
-        ("Sortino Ratio",    "sortino_ratio",   "{:.3f}"),
-        ("Max Drawdown",     "max_drawdown",    "{:.2%}"),
-        ("Calmar Ratio",     "calmar_ratio",    "{:.3f}"),
-        ("Ann. Volatility",  "annualised_vol",  "{:.2%}"),
-        ("Win Rate",         "win_rate",        "{:.2%}"),
+        ("Total Return",     "total_return",    "{:+.2%}",  True),
+        ("CAGR",             "cagr",            "{:+.2%}",  True),
+        ("Sharpe Ratio",     "sharpe_ratio",    "{:.3f}",   True),
+        ("Sortino Ratio",    "sortino_ratio",   "{:.3f}",   True),
+        ("Calmar Ratio",     "calmar_ratio",    "{:.3f}",   True),
+        ("Max Drawdown",     "max_drawdown",    "{:.2%}",   False),
+        ("Ann. Volatility",  "annualised_vol",  "{:.2%}",   False),
+        ("Win Rate",         "win_rate",        "{:.2%}",   True),
+        ("Profit Factor",    "profit_factor",   "{:.2f}",   True),
     ]
 
-    def _val(d, key, fmt):
+    def _raw(d, key):
         if d is None:
-            return "N/A"
+            return None
         v = d.get(key) if isinstance(d, dict) else getattr(d, key, None)
+        try:
+            return float(v) if v is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    def _val(d, key, fmt):
+        v = _raw(d, key)
         if v is None:
             return "N/A"
         try:
@@ -487,11 +496,28 @@ def _print_comparison_table(
         except Exception:
             return str(v)
 
-    bnh_label      = "Buy & Hold (EW)" if n_symbols > 1 else "Buy & Hold"
-    sma_label      = (f"SMA-{sma_long} (EW)"   if n_symbols > 1
-                      else f"SMA-{sma_long} Trend")
+    def _delta_str(strat, bnh, key, fmt, higher_better):
+        sv = _raw(strat, key)
+        bv = _raw(bnh, key)
+        if sv is None or bv is None:
+            return "N/A"
+        d = sv - bv
+        is_better = (d > 0) if higher_better else (d < 0)
+        s = (f"{d:+.2%}" if "%" in fmt else f"{d:+.3f}")
+        return f"[green]{s}[/green]" if is_better else f"[red]{s}[/red]"
+
+    def _delta_plain(strat, bnh, key, fmt, higher_better):
+        sv = _raw(strat, key)
+        bv = _raw(bnh, key)
+        if sv is None or bv is None:
+            return "N/A"
+        d = sv - bv
+        return (f"{d:+.2%}" if "%" in fmt else f"{d:+.3f}")
+
+    bnh_label       = "Buy & Hold (EW)" if n_symbols > 1 else "Buy & Hold"
+    sma_label       = (f"SMA-{sma_long} (EW)"        if n_symbols > 1 else f"SMA-{sma_long}")
     ema_cross_label = (f"EMA {ema_fast}/{ema_slow} (EW)" if n_symbols > 1
-                       else f"EMA {ema_fast}/{ema_slow} Cross")
+                       else f"EMA {ema_fast}/{ema_slow}")
 
     if console:
         try:
@@ -501,18 +527,18 @@ def _print_comparison_table(
                         header_style="bold yellow")
             tbl.add_column("Metric",          style="dim", min_width=18)
             tbl.add_column("Strategy",        justify="right")
+            tbl.add_column("Δ vs BnH",        justify="right", style="dim")
             tbl.add_column(bnh_label,         justify="right")
             tbl.add_column(sma_label,         justify="right")
             tbl.add_column(ema_cross_label,   justify="right")
-            tbl.add_column("Random (mean)",   justify="right")
-            for label, key, fmt in rows:
+            for label, key, fmt, higher_better in rows:
                 tbl.add_row(
                     label,
                     _val(strategy_report, key, fmt),
+                    _delta_str(strategy_report, bnh_metrics, key, fmt, higher_better),
                     _val(bnh_metrics, key, fmt),
                     _val(sma_metrics, key, fmt),
                     _val(ema_cross_metrics, key, fmt),
-                    _val(rand_metrics, key, fmt),
                 )
             console.print(tbl)
             return
@@ -520,16 +546,16 @@ def _print_comparison_table(
             pass
 
     print("\nBENCHMARK COMPARISON")
-    print(f"{'Metric':<20} {'Strategy':>12} {'BnH':>12} "
-          f"{f'SMA-{sma_long}':>12} {f'EMA {ema_fast}/{ema_slow}':>12} {'Random':>12}")
-    print("-" * 82)
-    for label, key, fmt in rows:
+    print(f"{'Metric':<20} {'Strategy':>12} {'Δ vs BnH':>10} "
+          f"{'BnH':>14} {f'SMA-{sma_long}':>12} {f'EMA {ema_fast}/{ema_slow}':>14}")
+    print("-" * 86)
+    for label, key, fmt, higher_better in rows:
         print(
             f"{label:<20} {_val(strategy_report, key, fmt):>12} "
-            f"{_val(bnh_metrics, key, fmt):>12} "
+            f"{_delta_plain(strategy_report, bnh_metrics, key, fmt, higher_better):>10} "
+            f"{_val(bnh_metrics, key, fmt):>14} "
             f"{_val(sma_metrics, key, fmt):>12} "
-            f"{_val(ema_cross_metrics, key, fmt):>12} "
-            f"{_val(rand_metrics, key, fmt):>12}"
+            f"{_val(ema_cross_metrics, key, fmt):>14}"
         )
 
 
@@ -2659,37 +2685,35 @@ def run_backtest(config: Dict, args: argparse.Namespace) -> None:
     pd.Series(metrics).to_csv(output_dir / "performance_summary.csv", header=False)
 
     _final_equity = result.final_equity
-    _print(
-        f"\n[green]Backtest complete.[/green]  "
-        f"Total return: [bold]{report.total_return:+.2%}[/bold]  "
-        f"Sharpe: [bold]{report.sharpe_ratio:.3f}[/bold]  "
-        f"MaxDD: [bold]{report.max_drawdown:.2%}[/bold]",
-        console,
-    )
-
-    # Plain-English interpretation of the key numbers
-    _sharpe_grade = (
-        "strong risk-adjusted return"        if report.sharpe_ratio >= 1.0  else
-        "acceptable risk-adjusted return"    if report.sharpe_ratio >= 0.5  else
-        "below benchmark — marginal edge"    if report.sharpe_ratio >= 0.0  else
-        "negative — strategy lost money on a risk-adjusted basis"
-    )
-    _dd_note = (
-        "within normal range for an equity strategy"  if abs(report.max_drawdown) <= 0.20 else
-        "significant — account lost over 20% at its worst"
-    )
     _cagr_str  = f"{report.cagr:+.1%}" if report.cagr is not None else "N/A"
     _years_str = f"{_years:.1f}"
+    _n_trades  = result.metadata["total_trades"]
+    _trades_yr = int(_n_trades / max(_years, 1))
+    _pf        = report.profit_factor
+    _pf_str    = f"{_pf:.2f}" if _pf < 999 else "∞"
+    _avg_win   = f"{report.avg_win:+.2%}/day" if report.avg_win else "—"
+    _avg_loss  = f"{report.avg_loss:+.2%}/day" if report.avg_loss else "—"
+    _uw_days   = report.longest_underwater_days
+    _dd_days   = report.max_drawdown_duration_days
+
     _print(
-        f"\n  [dim]Interpretation[/dim]\n"
-        f"  [dim]  ${initial_capital:,.0f}  →  ${_final_equity:,.0f}  "
-        f"over {_years_str} years   (CAGR {_cagr_str} / year)[/dim]\n"
-        f"  [dim]  Sharpe {report.sharpe_ratio:.3f} — {_sharpe_grade}[/dim]\n"
-        f"  [dim]  Max Drawdown {report.max_drawdown:.1%} — {_dd_note}[/dim]\n"
-        f"  [dim]  {result.metadata['total_trades']} trades across "
-        f"{result.metadata['n_folds']} out-of-sample folds "
-        f"(~{int(result.metadata['total_trades'] / max(_years, 1))} trades/year)[/dim]\n"
-        f"  [dim]  All results are out-of-sample — no lookahead bias[/dim]",
+        f"\n[green]Backtest complete.[/green]\n"
+        f"  [bold]Return[/bold]   {report.total_return:+.2%}  "
+        f"CAGR {_cagr_str}  "
+        f"Sharpe [bold]{report.sharpe_ratio:.3f}[/bold]  "
+        f"Sortino {report.sortino_ratio:.3f}  "
+        f"Calmar {report.calmar_ratio:.3f}  "
+        f"Profit Factor {_pf_str}\n"
+        f"  [bold]Risk[/bold]     MaxDD {report.max_drawdown:.1%} ({_dd_days}d)  "
+        f"Ann Vol {report.annualised_vol:.1%}  "
+        f"Worst day {report.worst_day:.1%}  "
+        f"Underwater {_uw_days}d\n"
+        f"  [bold]Trades[/bold]   {_n_trades} · {_trades_yr}/yr · "
+        f"{report.win_rate:.1%} win rate  "
+        f"up days {_avg_win}  down days {_avg_loss}\n"
+        f"  [dim]${initial_capital:,.0f} → ${_final_equity:,.0f}  "
+        f"over {_years_str}y   "
+        f"{result.metadata['n_folds']} OOS folds — no lookahead bias[/dim]",
         console,
     )
 

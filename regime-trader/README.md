@@ -142,29 +142,63 @@ regime-trader/
 
 ## Quick start
 
-### 1. Prerequisites
+### 1. Install (Linux / VPS / WSL2 — recommended)
 
-Python 3.12 is required. `hmmlearn` has no pre-built wheels for Python 3.13+.
+**One-command install** — handles Python check, venv, packages, credentials, and tests:
 
 ```bash
+git clone https://github.com/morningtrading/regime-trader.git
+cd regime-trader
+chmod +x install.sh
+./install.sh
+```
+
+The script runs 7 steps with pass/fail confirmation at each one:
+
+| Step | What it does |
+|---|---|
+| 1 | Checks Python 3.12 (installs via apt if missing) |
+| 2 | Creates `.venv/` inside the repo |
+| 3 | Installs all pinned packages from `requirements.txt` |
+| 4 | Verifies critical packages + BLAS backend |
+| 5 | Checks credentials file (creates template if missing) |
+| 6 | Runs full pytest suite |
+| 7 | Smoke-tests that all core modules import correctly |
+
+**Requirements:** Python 3.12, pip, git. On a fresh Ubuntu/Debian VPS:
+
+```bash
+sudo apt-get update && sudo apt-get install -y python3.12 python3.12-venv python3.12-dev git
+```
+
+---
+
+### Manual install (any platform)
+
+```bash
+# Linux / macOS / WSL2
+python3.12 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+
+# Windows (PowerShell)
 py -3.12 -m venv .venv
-.venv\Scripts\activate        # Windows
-# source .venv/bin/activate   # macOS/Linux
+.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 ```
 
 > **⚠️ Cross-platform reproducibility**
 >
-> Backtest results are **only bit-identical across Linux machines** (Ubuntu 24.04,
-> Linux Mint 22.2, and WSL2 Ubuntu-24.04 all produce the same pickle-exact output
-> down to the penny). **Windows native Python produces different results** — not a
-> bug, but an inherent consequence of MSVC-compiled numpy/scipy/hmmlearn wheels
-> vs the GCC-compiled Linux wheels. The HMM EM algorithm converges to slightly
-> different local optima → different regime labels → different trades → different P&L.
+> Backtest results are **deterministic across Linux machines** (Ubuntu 24.04 native,
+> WSL2 Ubuntu-24.04, Linux VPS — all produce identical output). **Windows native
+> Python produces different results** due to ILP64 vs LP64 OpenBLAS builds: the
+> HMM EM algorithm converges to different local optima → different regime labels
+> → different trades → different P&L (~15–30% difference in total return is normal).
 >
-> **For any published or production backtest, run on Linux (native or WSL2).**
-> Windows native is fine for development and quick iteration. See
-> `tools/verify_parity.sh` to audit cross-machine drift.
+> **Canonical platform: Linux (native or WSL2). Reference results:**
+> `Total Return +159.21% | Sharpe 1.123 | MaxDD -15.53%` (commit `ed6d342`, 5 symbols, 2020–2026)
+>
+> Windows is fine for development and quick iteration.
 
 ### 2. Credentials
 
