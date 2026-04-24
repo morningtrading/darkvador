@@ -39,6 +39,14 @@ print(f"Reading: {csv_path}\n")
 df = pd.read_csv(csv_path)
 df = df.dropna(subset=["sharpe"])
 df["symbols_list"] = df["symbols"].apply(json.loads)
+
+# Filter out crashed backtests (total loss = corrupted result, not a real signal)
+n_raw = len(df)
+df = df[df["total_return"] > -0.95].copy()
+n_filtered = n_raw - len(df)
+if n_filtered > 0:
+    print(f"  Filtered {n_filtered} crashed combos (total_return ≤ -95%) — likely crypto blowup\n")
+
 df = df.sort_values("sharpe", ascending=False).reset_index(drop=True)
 
 n = len(df)
@@ -115,6 +123,12 @@ print(f"\n  ★ = in current baseline basket")
 # ── 4. Pareto dominance check ─────────────────────────────────────────────────
 section("4. PARETO FRONTIER — is baseline dominated?")
 
+# Fallback values in case baseline is not in Phase 2 results
+b_sharpe: float = float("nan")
+b_corr:   float = float("nan")
+b_dd:     float = float("nan")
+dominated = pd.DataFrame()
+
 if not baseline_row.empty:
     b = baseline_row.iloc[0]
     b_sharpe = b["sharpe"]
@@ -145,6 +159,14 @@ if not baseline_row.empty:
     else:
         print("  → No combo strictly dominates the baseline on all three metrics.")
         print("    Check top-10 for combos that dominate on 2 out of 3.")
+else:
+    print(f"""
+  Baseline [SPY, QQQ, AAPL, MSFT, NVDA] was not in Phase 2 results.
+  It likely ranked below top-{15} in the 3-year Phase 1 screening.
+  Tip: force-include baseline by re-running monte_carlo_asset_selection.py —
+  the script always adds it to scored combos before Phase 1.
+  Check if mc_results_phase1.csv contains the baseline row and its 3yr Sharpe.
+""")
 
 # ── 5. Verdict ────────────────────────────────────────────────────────────────
 section("5. RECOMMENDATION")
@@ -160,15 +182,17 @@ if is_top1_baseline:
     The current selection is validated by the Monte Carlo search.
 """)
 else:
-    delta = top1["sharpe"] - (b_sharpe if not baseline_row.empty else 0)
+    b_ref = f"{b_sharpe:.3f}" if not pd.isna(b_sharpe) else "N/A (not in Phase 2)"
+    b_corr_ref = f"{b_corr:.3f}" if not pd.isna(b_corr) else "N/A"
+    delta_str = f"{top1['sharpe'] - b_sharpe:+.3f}" if not pd.isna(b_sharpe) else "N/A"
     print(f"""
-  ⚡ BETTER BASKET FOUND — top result outperforms baseline by {delta:+.3f} Sharpe:
+  ⚡ BETTER BASKET FOUND — top result outperforms baseline by {delta_str} Sharpe:
 
     Recommended: {top1_syms}
-    Sharpe:      {top1['sharpe']:.3f}  (baseline: {b_sharpe:.3f})
+    Sharpe:      {top1['sharpe']:.3f}  (baseline: {b_ref})
     Return:      {top1['total_return']:+.1%}
     MaxDD:       {top1['max_drawdown']:.1%}
-    AvgCorr:     {top1['avg_corr']:.3f}  (baseline: {b_corr:.3f})
+    AvgCorr:     {top1['avg_corr']:.3f}  (baseline: {b_corr_ref})
 
   Next steps:
     1. Verify this combo is free from hindsight bias (are any symbols

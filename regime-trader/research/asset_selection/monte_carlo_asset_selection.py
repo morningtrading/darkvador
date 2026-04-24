@@ -309,11 +309,18 @@ phase1_df = pd.read_csv(PHASE1_CSV)
 phase1_df = phase1_df.dropna(subset=["sharpe"]).sort_values("sharpe", ascending=False)
 
 # Top N + always include baseline
-top_keys   = set(phase1_df.head(PHASE2_TOP_N)["symbols"].tolist())
+top_keys  = set(phase1_df.head(PHASE2_TOP_N)["symbols"].tolist())
 top_keys.add(combo_key(baseline_tuple))
-finalists  = [(row["avg_corr"], json.loads(row["symbols"]))
-              for _, row in phase1_df.iterrows()
-              if row["symbols"] in top_keys]
+finalists = [(row["avg_corr"], json.loads(row["symbols"]))
+             for _, row in phase1_df.iterrows()
+             if row["symbols"] in top_keys]
+
+# Force-add baseline even if it never appeared in Phase 1 results
+baseline_key = combo_key(baseline_tuple)
+finalist_keys = {combo_key(tuple(sorted(c))) for _, c in finalists}
+if baseline_key not in finalist_keys:
+    finalists.append((baseline_corr, list(baseline_tuple)))
+    print(f"  Baseline force-added to Phase 2 (not in Phase 1 top-{PHASE2_TOP_N})")
 
 print(f"  Finalists: {len(finalists)} combos (top {PHASE2_TOP_N} + baseline)")
 
