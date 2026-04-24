@@ -25,6 +25,16 @@ groups:
     asset_class: mixed
     tags: [core, liquid, us, defensive, low-corr]
     symbols: [GOOGL, JNJ, TLT, UNH, XOM]
+  stocks4:
+    description: 5yr MC Rank 1 — best risk-adjusted basket including 2022 bear market
+    asset_class: mixed
+    tags: [core, liquid, us, diversified, low-corr]
+    symbols: [GLD, JNJ, LMT, NVDA, UNH, WMT]
+  stocks_gold:
+    description: Golden basket — top-6 symbols by cross-study frequency (150 combos, 3yr+5yr+6yr windows)
+    asset_class: mixed
+    tags: [core, liquid, us, diversified, low-corr, consensus]
+    symbols: [GLD, NOC, NVDA, TLT, UNH, WMT]
   indices:
     description: Broad-market & sector ETFs
     asset_class: etf
