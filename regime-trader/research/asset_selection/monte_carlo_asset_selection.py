@@ -48,15 +48,15 @@ UNIVERSE = [
     "NVDA", "AMD", "QCOM",
     "LMT", "RTX", "NOC",
     "PFE", "ABT",
-    "BTC/USD", "ETH/USD",
+    # BTC/USD and ETH/USD removed — incompatible with equity HMM position sizing
 ]
 
 BASELINE      = ["SPY", "QQQ", "AAPL", "MSFT", "NVDA"]
 PHASE1_START  = "2023-01-01"
 PHASE2_START  = "2020-01-01"
 END_DATE      = str(date.today())
-TOP_PER_K     = 50    # lowest-corr combos per k fed to Phase 1 (150 total)
-PHASE2_TOP_N  = 15    # top Phase 1 results → Phase 2
+TOP_PER_K     = 5     # TEST MODE: 5 per k → 15 total combos
+PHASE2_TOP_N  = 5     # TEST MODE: top 5 → Phase 2
 SAMPLE_K6     = 60_000
 SAMPLE_K7     = 60_000
 RNG_SEED      = 42

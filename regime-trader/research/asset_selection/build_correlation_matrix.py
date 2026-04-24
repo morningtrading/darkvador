@@ -45,8 +45,7 @@ UNIVERSE = [
     "LMT", "RTX", "NOC",
     # Healthcare individual
     "PFE", "ABT",
-    # Crypto (experimental)
-    "BTC/USD", "ETH/USD",
+    # BTC/USD and ETH/USD removed — incompatible with equity HMM position sizing
 ]
 
 START = "2020-01-01"
@@ -146,19 +145,19 @@ print("  PAIRWISE CORRELATION SNAPSHOT (selected pairs)")
 print(LINE)
 
 REFERENCE_PAIRS = [
-    ("SPY",     "QQQ"),
-    ("SPY",     "GLD"),
-    ("SPY",     "TLT"),
-    ("SPY",     "BTC/USD"),
-    ("QQQ",     "AAPL"),
-    ("QQQ",     "NVDA"),
-    ("QQQ",     "LMT"),
-    ("TLT",     "GLD"),
-    ("AAPL",    "MSFT"),
-    ("LMT",     "NOC"),
-    ("XLF",     "JPM"),
-    ("XLE",     "XOM"),
-    ("BTC/USD", "ETH/USD"),
+    ("SPY",  "QQQ"),
+    ("SPY",  "GLD"),
+    ("SPY",  "TLT"),
+    ("SPY",  "IWM"),
+    ("QQQ",  "AAPL"),
+    ("QQQ",  "NVDA"),
+    ("QQQ",  "LMT"),
+    ("TLT",  "GLD"),
+    ("AAPL", "MSFT"),
+    ("LMT",  "NOC"),
+    ("XLF",  "JPM"),
+    ("XLE",  "XOM"),
+    ("UNH",  "JNJ"),
 ]
 
 print(f"  {'Symbol A':<12}  {'Symbol B':<12}  {'Corr':>6}")
