@@ -12,6 +12,9 @@ Usage (from repo root, WSL):
     python research/asset_selection/asset_selection_report.py results/mc_results_phase2.csv
 """
 from __future__ import annotations
+import datetime
+import socket
+import subprocess
 import sys
 import json
 from pathlib import Path
@@ -34,6 +37,29 @@ else:
     if not candidates:
         sys.exit("No mc_results_phase2.csv found. Run monte_carlo_asset_selection.py first.")
     csv_path = candidates[0]
+
+# ── Run metadata header ───────────────────────────────────────────────────────
+def _git_hash() -> str:
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=str(Path(__file__).resolve().parent.parent.parent),
+            stderr=subprocess.DEVNULL,
+        ).decode().strip()
+    except Exception:
+        return "unknown"
+
+_W = 72
+print("─" * _W)
+print("  Asset Selection Report — Monte Carlo Study")
+print("─" * _W)
+print(f"  Source CSV   : {csv_path}")
+print(f"  Report script: {Path(__file__).resolve()}")
+print(f"  Timestamp    : {datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
+print(f"  Machine      : {socket.gethostname()}  (Python {sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro})")
+print(f"  Bot version  : {_git_hash()}")
+print("─" * _W)
+print()
 
 print(f"Reading: {csv_path}\n")
 df = pd.read_csv(csv_path)
@@ -205,7 +231,11 @@ else:
 summary_path = OUT / "asset_selection_summary.md"
 with open(summary_path, "w") as f:
     f.write("# Asset Selection Monte Carlo Summary\n\n")
-    f.write(f"Source: `{csv_path.name}`\n\n")
+    f.write(f"| Field | Value |\n|---|---|\n")
+    f.write(f"| Source CSV | `{csv_path.name}` |\n")
+    f.write(f"| Generated  | {datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')} |\n")
+    f.write(f"| Machine    | {socket.gethostname()} (Python {sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}) |\n")
+    f.write(f"| Bot version| {_git_hash()} |\n\n")
     f.write("## Top 10 Combos (6-year Sharpe)\n\n")
     f.write("| Rank | k | Sharpe | Return | MaxDD | AvgCorr | Symbols |\n")
     f.write("|------|---|--------|--------|-------|---------|--------|\n")

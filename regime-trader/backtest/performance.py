@@ -454,11 +454,17 @@ class PerformanceAnalyzer:
         self,
         report: PerformanceReport,
         print_to_console: bool = True,
+        run_context: Optional[Dict] = None,
     ) -> str:
         """
         Format a :class:`PerformanceReport` as rich terminal tables.
 
         Returns the plain-text version of the output.
+
+        run_context keys (all optional):
+            asset_group, symbols, symbol_descriptions, start_date, end_date,
+            run_timestamp, machine, git_hash, python_version, output_path,
+            n_states, train_window, test_window, step_size, n_folds
         """
         try:
             from rich.console import Console
@@ -470,6 +476,65 @@ class PerformanceAnalyzer:
 
         buf = io.StringIO()
         lines: List[str] = []
+
+        # ── Run context header ─────────────────────────────────────────────────
+        if run_context:
+            _W = 72
+            ctx_lines = [f"{'─' * _W}"]
+            ctx_lines.append("  Run Context")
+            ctx_lines.append(f"{'─' * _W}")
+
+            ag = run_context.get("asset_group") or "—"
+            syms = run_context.get("symbols") or []
+            descs = run_context.get("symbol_descriptions") or {}
+            sym_str = ", ".join(syms) if syms else "—"
+            ctx_lines.append(f"  Asset Group  : {ag}")
+            ctx_lines.append(f"  Symbols      : {sym_str}")
+            if descs:
+                for s in syms:
+                    d = descs.get(s, "")
+                    if d:
+                        ctx_lines.append(f"    {s:<8} {d}")
+
+            sd = run_context.get("start_date", "")
+            ed = run_context.get("end_date", "")
+            if sd or ed:
+                ctx_lines.append(f"  Period       : {sd}  →  {ed}")
+
+            ts = run_context.get("run_timestamp", "")
+            machine = run_context.get("machine", "")
+            pyver = run_context.get("python_version", "")
+            if ts:
+                ctx_lines.append(f"  Timestamp    : {ts}")
+            if machine or pyver:
+                ctx_lines.append(f"  Machine      : {machine}  (Python {pyver})")
+
+            git_hash = run_context.get("git_hash", "")
+            if git_hash:
+                ctx_lines.append(f"  Bot version  : {git_hash}")
+
+            out_path = run_context.get("output_path", "")
+            if out_path:
+                ctx_lines.append(f"  Output path  : {out_path}")
+
+            tw = run_context.get("train_window")
+            tew = run_context.get("test_window")
+            ss = run_context.get("step_size")
+            nf = run_context.get("n_folds")
+            ns = run_context.get("n_states")
+            if any(x is not None for x in [tw, tew, ss]):
+                ctx_lines.append(
+                    f"  Walk-forward : IS {tw} / OOS {tew} bars  step {ss}"
+                    + (f"  ({nf} folds)" if nf else "")
+                )
+            if ns:
+                ctx_lines.append(f"  HMM states   : {ns}")
+
+            ctx_lines.append(f"{'─' * _W}")
+            ctx_block = "\n".join(ctx_lines)
+            if print_to_console:
+                print(ctx_block)
+            buf.write(ctx_block + "\n")
 
         def _pct(v: Optional[float], decimals: int = 2) -> str:
             if v is None:

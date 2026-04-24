@@ -31,6 +31,8 @@ import json
 import logging
 import os
 import signal
+import socket
+import subprocess
 import sys
 import time
 import traceback
@@ -450,6 +452,59 @@ def _print_run_config(
     for line in lines:
         _print(line, console, style="dim")
 
+
+
+def _build_run_context(
+    symbols: List[str],
+    start_date: str,
+    end_date: str,
+    config: Dict,
+    output_dir: Path,
+    asset_group: Optional[str] = None,
+    n_folds: Optional[int] = None,
+) -> Dict:
+    """Build a dict of run metadata for config-control headers and JSON sidecar."""
+    bt_cfg  = config.get("backtest", {})
+    hmm_cfg = config.get("hmm", {})
+
+    # git short hash — best-effort
+    try:
+        git_hash = subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=str(_ROOT), stderr=subprocess.DEVNULL,
+        ).decode().strip()
+    except Exception:
+        git_hash = "unknown"
+
+    # symbol descriptions from asset_groups registry
+    sym_descs: Dict[str, str] = {}
+    if asset_group:
+        try:
+            from core.asset_groups import load_default_registry
+            reg = load_default_registry()
+            if reg.has(asset_group):
+                grp = reg.get(asset_group)
+                sym_descs = {s: grp.description for s in symbols}
+        except Exception:
+            pass
+
+    return {
+        "asset_group":         asset_group or "—",
+        "symbols":             list(symbols),
+        "symbol_descriptions": sym_descs,
+        "start_date":          start_date,
+        "end_date":            end_date,
+        "run_timestamp":       dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+        "machine":             socket.gethostname(),
+        "python_version":      f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
+        "git_hash":            git_hash,
+        "output_path":         str(output_dir),
+        "train_window":        int(bt_cfg.get("train_window", 252)),
+        "test_window":         int(bt_cfg.get("test_window", 126)),
+        "step_size":           int(bt_cfg.get("step_size", 126)),
+        "n_states":            hmm_cfg.get("n_candidates", [3, 4, 5]),
+        "n_folds":             n_folds,
+    }
 
 
 def _print_comparison_table(
@@ -2560,7 +2615,17 @@ def run_backtest(config: Dict, args: argparse.Namespace) -> None:
     bm_sym    = symbols[0]
     bm_prices = prices[bm_sym] if getattr(args, "compare", False) else None
     report    = pa.analyze(result, benchmark_prices=bm_prices)
-    pa.generate_report(report, print_to_console=True)
+
+    run_context = _build_run_context(
+        symbols     = list(prices.columns),
+        start_date  = start_date,
+        end_date    = end_date,
+        config      = config,
+        output_dir  = output_dir,
+        asset_group = getattr(args, "asset_group", None),
+        n_folds     = result.metadata.get("n_folds"),
+    )
+    pa.generate_report(report, print_to_console=True, run_context=run_context)
 
     if getattr(args, "compare", False) and bm_prices is not None:
         _print("\nComputing benchmark strategies ...", console, style="dim")
@@ -2683,6 +2748,9 @@ def run_backtest(config: Dict, args: argparse.Namespace) -> None:
         "end":           end_date,
     }
     pd.Series(metrics).to_csv(output_dir / "performance_summary.csv", header=False)
+
+    with open(output_dir / "run_context.json", "w") as _f:
+        json.dump(run_context, _f, indent=2, default=str)
 
     _final_equity = result.final_equity
     _cagr_str  = f"{report.cagr:+.1%}" if report.cagr is not None else "N/A"

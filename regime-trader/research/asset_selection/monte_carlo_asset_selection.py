@@ -16,7 +16,10 @@ Usage (from repo root, WSL):
 Resume-safe: already-completed combos are skipped on re-run.
 """
 from __future__ import annotations
+import datetime
 import os
+import socket
+import subprocess
 import sys
 import json
 import time
@@ -266,6 +269,51 @@ def run_phase(
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
+
+    # ── Run metadata — written at start for config control ────────────────────
+    def _git_hash_mc() -> str:
+        try:
+            return subprocess.check_output(
+                ["git", "rev-parse", "--short", "HEAD"],
+                cwd=str(ROOT), stderr=subprocess.DEVNULL,
+            ).decode().strip()
+        except Exception:
+            return "unknown"
+
+    _run_meta = {
+        "script":        str(Path(__file__).resolve()),
+        "run_timestamp": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+        "machine":       socket.gethostname(),
+        "python_version": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
+        "git_hash":      _git_hash_mc(),
+        "universe":      UNIVERSE,
+        "n_universe":    len(UNIVERSE),
+        "top_per_k":     TOP_PER_K,
+        "phase2_top_n":  PHASE2_TOP_N,
+        "phase1_start":  PHASE1_START,
+        "phase2_start":  PHASE2_START,
+        "n_workers":     N_WORKERS,
+        "rng_seed":      RNG_SEED,
+        "sample_k6":     SAMPLE_K6,
+        "sample_k7":     SAMPLE_K7,
+        "output_dir":    str(OUT),
+    }
+    with open(OUT / "run_metadata.json", "w") as _mf:
+        json.dump(_run_meta, _mf, indent=2)
+
+    _W = 72
+    print("─" * _W)
+    print("  Monte Carlo Asset Selection")
+    print("─" * _W)
+    print(f"  Timestamp    : {_run_meta['run_timestamp']}")
+    print(f"  Machine      : {_run_meta['machine']}  (Python {_run_meta['python_version']})")
+    print(f"  Bot version  : {_run_meta['git_hash']}")
+    print(f"  Universe     : {len(UNIVERSE)} symbols  TOP_PER_K={TOP_PER_K}  PHASE2_TOP_N={PHASE2_TOP_N}")
+    print(f"  Phase 1 start: {PHASE1_START}   Phase 2 start: {PHASE2_START}")
+    print(f"  Workers      : {N_WORKERS}  RNG seed: {RNG_SEED}")
+    print(f"  Output dir   : {OUT}")
+    print("─" * _W)
+    print()
 
     # ── Step 1: load correlation matrix ──────────────────────────────────────
     corr_path = OUT / "corr_matrix.csv"
