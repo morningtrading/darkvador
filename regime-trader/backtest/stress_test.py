@@ -264,7 +264,7 @@ class StressTester:
             stressed = self.inject_crash(prices, crash_pct, inject_bar, dur_bars)
 
             try:
-                res = self.backtester.run(stressed, hmm_config, strategy_config)
+                res = self.backtester.run(stressed, hmm_config, strategy_config, None)
                 rpt = self.analyzer.analyze(res)
                 sharpes.append(rpt.sharpe_ratio)
                 drawdowns.append(rpt.max_drawdown)
