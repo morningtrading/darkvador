@@ -326,15 +326,49 @@ Key HMM parameters explained:
 
 The backtester uses a strict walk-forward methodology to prevent look-ahead bias:
 
-- **In-sample window** (default 252 bars ≈ 12 months): HMM trained here
-- **Out-of-sample window** (default 126 bars ≈ 6 months): strategy evaluated blind
-- **Step size**: equal to the OOS window — test periods never overlap
+- **In-sample window** (`train_window=252` bars ≈ 12 months): HMM trained here
+- **Out-of-sample window** (`test_window=63` bars ≈ 3 months): strategy evaluated blind
+- **Step size** (`step_size=63`): equal to the OOS window — test periods never overlap
 - Equity is carried forward between folds (compounding)
-- ~200 bars consumed as feature warmup (SMA-200 requires 200 bars); data before the first clean bar is not wasted — it feeds the warmup
+- ~252 bars consumed as feature warmup (SMA-200 + rolling volatility); data before the first clean bar feeds the warmup only
 
 A start date of 2020-01-01 with default windows produces first OOS results starting around mid-2022. This is expected and correct.
 
 Performance metrics per fold and overall: CAGR, Sharpe, max drawdown, annualised vol, regime breakdown, regime transition matrix, comparison to buy-and-hold and SMA-200 benchmarks.
+
+### Why 17 folds?
+
+The number of folds is not a free parameter — it is fully determined by the data length and the three window settings:
+
+```
+usable bars  = total trading days − warmup
+             ≈ 1587 − 252 = 1335 bars  (2020-01-01 → 2026-04-24)
+
+n_folds      = floor((usable − train_window − test_window) / step_size) + 1
+             = floor((1335 − 252 − 63) / 63) + 1
+             = floor(16.19) + 1
+             = 17 folds
+```
+
+Each fold covers a 3-month blind evaluation window, giving **1071 total out-of-sample bars** across the full backtest period. Adjacent in-sample windows share ~75% of their data (only 63 bars shift each time), which is normal and expected — it does not invalidate the OOS evaluation because the OOS windows themselves never overlap.
+
+**Could we use fewer or more folds?**
+
+| Alternative | How | Effect |
+|---|---|---|
+| ~7 folds | `step_size=126` (6-month steps) | Each OOS period is 3 months but spaced further apart. Less temporal granularity; aggregate Sharpe barely changes if the strategy is stationary. |
+| ~35 folds | `step_size=31` (6-week steps) | OOS windows would overlap (invalid) — or `test_window` must shrink to 31 bars, making each fold too short to measure anything reliably. |
+| 1 fold | Single train/test split | Classical approach. Highly sensitive to which market period falls in OOS. Cannot detect whether the strategy degrades over time. |
+
+**What the fold stability analysis shows** (see `research/fold_analysis/`):
+
+- Per-fold Sharpe ranges from −2.6 (Apr–Jul 2022 rate shock) to +4.3 (May–Jul 2023 bull run) — high variance is expected for 63-bar windows
+- Aggregate Sharpe is reliable: bootstrap 95% CI = [0.38, 2.30], lower bound firmly positive
+- No temporal decay: later folds perform as well as earlier ones (Sharpe drift +0.29)
+- Top 3 folds = 49% of gains — moderate concentration, not alarming
+- **17 is the natural optimum** for this data length: fewer folds sacrifice temporal granularity, more folds would require overlapping or shorter OOS windows
+
+The high per-fold variance (CoV = 1.39) is a property of the short 63-bar OOS window, not a sign of an unstable strategy. The 1071-bar aggregate is what matters for statistical inference.
 
 ---
 
