@@ -20,6 +20,11 @@ groups:
     asset_class: mixed
     tags: [core, liquid, us, diversified]
     symbols: [GLD, GOOGL, NVDA, PEP, TLT, UNH, XOM]
+  stocks3:
+    description: 3yr MC Rank 1 — ultra-low-corr defensive basket (no tech, no SPY/QQQ)
+    asset_class: mixed
+    tags: [core, liquid, us, defensive, low-corr]
+    symbols: [GOOGL, JNJ, TLT, UNH, XOM]
   indices:
     description: Broad-market & sector ETFs
     asset_class: etf
