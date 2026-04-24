@@ -166,6 +166,7 @@ print_menu() {
     echo ""
     echo -e "  ${GREEN}[7]${RESET}  Stress Test      ${DIM}(crash / gap / vol-spike scenarios, active group)${RESET}"
     echo -e "  ${GREEN}[8]${RESET}  Train + Backtest ${DIM}(retrain HMM then full benchmark, active group)${RESET}"
+    echo -e "  ${GREEN}[9]${RESET}  Report           ${DIM}(formatted metrics report on latest backtest)${RESET}"
     echo ""
     echo -e "  ${YELLOW}── Analysis ────────────────────────────────${RESET}"
     echo -e "  ${GREEN}[p]${RESET}  Interval Sweep   ${DIM}(find best min_rebalance_interval, active group)${RESET}"
@@ -660,6 +661,11 @@ while true; do
             run_command \
                 "Train HMM + Backtest — group: $ASSET_GROUP" \
                 "$PYTHON main.py trade --train-only --asset-group $ASSET_GROUP && $PYTHON main.py backtest --asset-group $ASSET_GROUP --start 2020-01-01 --compare"
+            ;;
+        9)
+            run_command \
+                "Report — latest backtest results" \
+                "PYTHONIOENCODING=utf-8 $PYTHON tools/report.py"
             ;;
         p|P)
             run_command \
