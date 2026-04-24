@@ -55,8 +55,8 @@ BASELINE      = ["SPY", "QQQ", "AAPL", "MSFT", "NVDA"]
 PHASE1_START  = "2023-01-01"
 PHASE2_START  = "2020-01-01"
 END_DATE      = str(date.today())
-TOP_PER_K     = 300   # lowest-corr combos per k fed to Phase 1
-PHASE2_TOP_N  = 20    # top Phase 1 results → Phase 2
+TOP_PER_K     = 50    # lowest-corr combos per k fed to Phase 1 (150 total)
+PHASE2_TOP_N  = 15    # top Phase 1 results → Phase 2
 SAMPLE_K6     = 60_000
 SAMPLE_K7     = 60_000
 RNG_SEED      = 42
@@ -174,7 +174,7 @@ def run_backtest(
     if len(syms) < 2:
         return None
     proxy = pick_regime_proxy(tuple(syms))
-    hmm_cfg = {**base_cfg.get("hmm", {}), "regime_proxy": proxy}
+    hmm_cfg = {**base_cfg.get("hmm", {}), "regime_proxy": proxy, "n_init": 3}
 
     bt = WalkForwardBacktester(
         symbols         = syms,
@@ -294,7 +294,7 @@ for i, (corr_val, combo) in enumerate(todo):
     else:
         print("SKIPPED")
 
-    if (i + 1) % 50 == 0 or (i + 1) == len(todo):
+    if (i + 1) % 10 == 0 or (i + 1) == len(todo):
         pd.DataFrame(phase1_rows).to_csv(PHASE1_CSV, index=False)
         print(f"    → checkpoint saved ({len(phase1_rows)} rows)")
 
