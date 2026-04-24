@@ -60,7 +60,7 @@ UNIVERSE = [
 ]
 
 BASELINE      = ["SPY", "QQQ", "AAPL", "MSFT", "NVDA"]
-PHASE1_START  = "2023-01-01"
+PHASE1_START  = "2021-01-01"
 PHASE2_START  = "2020-01-01"
 END_DATE      = str(date.today())
 TOP_PER_K     = 50    # lowest-corr combos per k → 150 total for Phase 1
