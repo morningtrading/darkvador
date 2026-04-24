@@ -15,6 +15,11 @@ groups:
       NOT YET VALIDATED under the same selection-bias / fair-slippage
       framework as indices. Symbols chosen by recent market cap may carry
       hindsight. Run a neutral pre-2020 basket check before live trading.
+  stocks2:
+    description: MC-selected low-correlation basket — GLD+TLT anchor, diversified sectors
+    asset_class: mixed
+    tags: [core, liquid, us, diversified]
+    symbols: [GLD, GOOGL, NVDA, PEP, TLT, UNH, XOM]
   indices:
     description: Broad-market & sector ETFs
     asset_class: etf
