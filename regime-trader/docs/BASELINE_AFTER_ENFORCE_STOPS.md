@@ -1,5 +1,17 @@
 # Baseline After Enabling `enforce_stops=True` by Default
 
+> **OBSOLETE — 2026-04-25.** The `enforce_stops=True` default was reverted after
+> the ATR multiplier sweep ([sweep_atr_multiplier_report.md](../savedresults/sweep_atr_multiplier_report.md))
+> showed that ATR per-trade stops degrade BOTH return and Sharpe (1.019 → 0.584)
+> across all factor variants — meaning they cut profitable trades, not just
+> losers. Investigation also revealed that **live trading never sent stops to
+> the broker** (`main.py:1753` calls `submit_order`, not `submit_bracket_order`),
+> so this "alignment" baseline was actually a misalignment. Risk is now managed
+> exclusively by HMM regime allocation + portfolio DD halts (`max_dd_from_peak`,
+> `daily_dd_halt`). Default flipped back to `False` in 4 backtester signatures
+> and `main.py`. Use the canonical pre-flip baseline (174.87% / 1.019 / −32.80%)
+> as the reference. The numbers below are kept for historical context only.
+
 ## Context
 
 Following the change to flip `enforce_stops` default from `False` to `True` in

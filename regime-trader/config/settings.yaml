@@ -52,6 +52,8 @@ strategy:
   vol_target_window: 20
   sma_blend_weight: 1.0
   skip_neutral_regime: true
+  mid_vol_atr_mult: 0.5      # ATR multiplier for MidVol stop (50EMA - mult*ATR)
+  high_vol_atr_mult: 1.0     # ATR multiplier for HighVol stop (50EMA - mult*ATR)
 risk:
   max_risk_per_trade: 0.01
   max_single_position: 0.15
@@ -133,8 +135,8 @@ strategies:
 # ── Telegram notifications ─────────────────────────────────────────────────────
 notifications:
   telegram:
-    enabled: false          # master switch — set true to activate
+    enabled: true          # master switch — set true to activate
     on_backtest: true       # send summary after each backtest
     on_stress: true         # send results after stress test
     on_regime_change: true  # send alert on HMM regime transition (live)
-    on_trade: false         # send each individual trade (can be noisy)
+    on_trade: true# send each individual trade (can be noisy)

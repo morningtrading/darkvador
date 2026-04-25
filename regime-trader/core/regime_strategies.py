@@ -784,6 +784,8 @@ class StrategyOrchestrator:
         self._mid_notrd_allocation: float = strategy_cfg.get("mid_vol_allocation_no_trend", 0.60)
         self._high_vol_allocation: float  = strategy_cfg.get("high_vol_allocation", 0.60)
         self._low_vol_leverage: float     = strategy_cfg.get("low_vol_leverage", 1.25)
+        self._mid_vol_atr_mult: float     = float(strategy_cfg.get("mid_vol_atr_mult", 0.5))
+        self._high_vol_atr_mult: float    = float(strategy_cfg.get("high_vol_atr_mult", 1.0))
         self._uncertainty_mult: float     = strategy_cfg.get("uncertainty_size_mult", 0.50)
 
         # SMA-200 trend gate: when the market proxy is above its 200-bar SMA,
@@ -820,6 +822,7 @@ class StrategyOrchestrator:
         self._sma_gate_mid_strategy: BaseStrategy = MidVolCautiousStrategy(
             allocation_above_ema=self._mid_trend_allocation,
             allocation_below_ema=self._mid_notrd_allocation,
+            ema_stop_mult=self._mid_vol_atr_mult,
         )
         self._sma_gate_bull_strategy: BaseStrategy = LowVolBullStrategy(
             allocation=self._low_vol_allocation,
@@ -871,12 +874,14 @@ class StrategyOrchestrator:
             elif vol_rank >= 0.67:
                 strategy = HighVolDefensiveStrategy(
                     allocation=self._high_vol_allocation,
+                    ema_stop_mult=self._high_vol_atr_mult,
                 )
                 tier = "high_vol"
             else:
                 strategy = MidVolCautiousStrategy(
                     allocation_above_ema=self._mid_trend_allocation,
                     allocation_below_ema=self._mid_notrd_allocation,
+                    ema_stop_mult=self._mid_vol_atr_mult,
                 )
                 tier = "mid_vol"
 

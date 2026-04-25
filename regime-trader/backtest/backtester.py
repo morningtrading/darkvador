@@ -265,7 +265,7 @@ class WalkForwardBacktester:
         strategy_config: Optional[Dict] = None,
         risk_config: Optional[Dict] = None,
         progress_callback=None,
-        enforce_stops: bool = True,
+        enforce_stops: bool = False,
     ) -> BacktestResult:
         """
         Execute the full walk-forward backtest.
@@ -513,7 +513,7 @@ class WalkForwardBacktester:
         start_equity: float,
         hmm_cfg: Dict,
         strat_cfg: Dict,
-        enforce_stops: bool = True,
+        enforce_stops: bool = False,
     ) -> WindowResult:
         """
         Execute one walk-forward fold.
@@ -747,7 +747,7 @@ class WalkForwardBacktester:
         fitted_engine: "HMMEngine",
         strat_cfg: Dict,
         min_conf: float,
-        enforce_stops: bool = True,
+        enforce_stops: bool = False,
     ) -> WindowResult:
         """
         Replay OOS simulation using a *pre-fitted* engine.
@@ -943,7 +943,7 @@ class WalkForwardBacktester:
         hmm_config: Optional[Dict] = None,
         strategy_config: Optional[Dict] = None,
         progress_callback=None,
-        enforce_stops: bool = True,
+        enforce_stops: bool = False,
     ) -> "List[Tuple[float, int, BacktestResult]]":
         """
         2-D grid sweep over ``min_confidence`` × ``stability_bars``.
