@@ -1484,6 +1484,16 @@ class TradingSession:
                 f"{fill_event.qty:.0f} {fill_event.symbol} "
                 f"@ ${fill_event.fill_price:.2f}"
             ))
+            try:
+                from telegram.notifier import notify as _tg_notify
+                _tg_notify("trade", {
+                    "symbol":      fill_event.symbol,
+                    "side":        fill_event.side,
+                    "asset_group": self.config.get("broker", {}).get("asset_group", "—"),
+                    "regime":      self._last_regime or "?",
+                })
+            except Exception:
+                pass
 
         self.position_tracker.register_fill_callback(_on_fill)
 
@@ -1623,7 +1633,20 @@ class TradingSession:
                     new_feature_row = feature_matrix[-1],
                     timestamp       = timestamp,
                 )
+                _prev_regime = self._last_regime
                 self._last_regime = regime_state.label
+                if _prev_regime and _prev_regime != self._last_regime:
+                    try:
+                        from telegram.notifier import notify as _tg_notify
+                        _equity = float(self.position_tracker.get_equity() or 0)
+                        _tg_notify("regime_change", {
+                            "from_regime": _prev_regime,
+                            "to_regime":   self._last_regime,
+                            "asset_group": broker_cfg.get("asset_group", "—"),
+                            "equity":      _equity or None,
+                        })
+                    except Exception:
+                        pass
             except Exception as exc:
                 logger.error(
                     "HMM update failed: %s -- holding regime=%s",
@@ -2718,6 +2741,11 @@ def run_backtest(config: Dict, args: argparse.Namespace) -> None:
             else:
                 print(tbl.to_string())
             tbl.to_csv(output_dir / "stress_test_summary.csv")
+            try:
+                from telegram.notifier import notify as _tg_notify
+                _tg_notify("stress")
+            except Exception:
+                pass
 
     _print(f"\nSaving results to {output_dir}/", console, style="dim")
     result.combined_equity.rename("equity").to_csv(
@@ -2751,6 +2779,12 @@ def run_backtest(config: Dict, args: argparse.Namespace) -> None:
 
     with open(output_dir / "run_context.json", "w") as _f:
         json.dump(run_context, _f, indent=2, default=str)
+
+    try:
+        from telegram.notifier import notify as _tg_notify
+        _tg_notify("backtest")
+    except Exception:
+        pass
 
     _final_equity = result.final_equity
     _cagr_str  = f"{report.cagr:+.1%}" if report.cagr is not None else "N/A"
@@ -3760,6 +3794,10 @@ def build_parser() -> argparse.ArgumentParser:
                           help="Capital allocation approach: equal_weight | inverse_vol | risk_parity | performance_weighted")
     trade_p.add_argument("--no-portfolio-risk", action="store_true", dest="no_portfolio_risk",
                           help="Disable portfolio-level PortfolioRiskManager (per-strategy RM still active)")
+    trade_p.add_argument("--telegram",    action="store_true",  default=None, dest="telegram",
+                          help="Force-enable Telegram notifications")
+    trade_p.add_argument("--no-telegram", action="store_false", dest="telegram",
+                          help="Force-disable Telegram notifications")
 
     # ── backtest ──────────────────────────────────────────────────────────────
     bt_p = sub.add_parser("backtest", help="Run walk-forward backtest")
@@ -3780,6 +3818,10 @@ def build_parser() -> argparse.ArgumentParser:
                        help="Enforce stop-loss exits during OOS simulation")
     bt_p.add_argument("--stress-test",  action="store_true", dest="stress_test",
                        help="Run stress scenarios after the backtest")
+    bt_p.add_argument("--telegram",    action="store_true",  default=None, dest="telegram",
+                       help="Force-enable Telegram notifications for this run")
+    bt_p.add_argument("--no-telegram", action="store_false", dest="telegram",
+                       help="Force-disable Telegram notifications for this run")
     bt_p.add_argument("--set",          default=None, dest="config_set",
                        help="Config set to apply (conservative | balanced | aggressive)")
     bt_p.add_argument("--multi-strat",  action="store_true", dest="multi_strat",
@@ -3799,6 +3841,10 @@ def build_parser() -> argparse.ArgumentParser:
     stress_p.add_argument("--end",         default=None)
     stress_p.add_argument("--set",         default=None, dest="config_set",
                            help="Config set to apply")
+    stress_p.add_argument("--telegram",    action="store_true",  default=None, dest="telegram",
+                           help="Force-enable Telegram notifications")
+    stress_p.add_argument("--no-telegram", action="store_false", dest="telegram",
+                           help="Force-disable Telegram notifications")
 
     # ── full-cycle ────────────────────────────────────────────────────────────
     full_p = sub.add_parser("full-cycle", help="Run backtest for all 3 asset groups (stocks, crypto, indices)")
@@ -3920,6 +3966,13 @@ def main() -> None:
 
     config = load_config(args.config, set_name=getattr(args, "config_set", None))
     load_credentials()
+
+    # Configure Telegram notifier — CLI flag overrides settings.yaml
+    try:
+        from telegram.notifier import configure as _tg_configure
+        _tg_configure(enabled=getattr(args, "telegram", None))
+    except Exception:
+        pass
 
     if args.command == "trade":
         if getattr(args, "paper", None):
