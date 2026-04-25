@@ -378,11 +378,24 @@ class WalkForwardBacktester:
         equity = self.initial_capital
         fold_results: List[WindowResult] = []
 
-        # AUDIT: hash full feature matrix
+        # AUDIT: hash full feature matrix + per-column
         import hashlib as _hl
         _fh = _hl.md5(pd.util.hash_pandas_object(clean_features).values).hexdigest()
         print(f"AUDIT CLEAN_FEATURES_HASH={_fh} shape={clean_features.shape} "
               f"cols={list(clean_features.columns)}", flush=True)
+        for _col in clean_features.columns:
+            _ch = _hl.md5(pd.util.hash_pandas_object(clean_features[_col]).values).hexdigest()
+            _s = clean_features[_col]
+            print(f"AUDIT COL {_col:<22s} hash={_ch} mean={_s.mean():.10f} std={_s.std():.10f} "
+                  f"first={_s.iloc[0]:.10f} last={_s.iloc[-1]:.10f}", flush=True)
+        # also hash VIX series if present
+        if _vix_bt is not None:
+            _vh = _hl.md5(pd.util.hash_pandas_object(_vix_bt).values).hexdigest()
+            print(f"AUDIT VIX_RAW_HASH={_vh} shape={_vix_bt.shape} "
+                  f"first={_vix_bt.iloc[0]:.6f} last={_vix_bt.iloc[-1]:.6f} "
+                  f"n_nan={_vix_bt.isna().sum()}", flush=True)
+        else:
+            print("AUDIT VIX_RAW=None", flush=True)
 
         for fold_id, (is_s, is_e, oos_s, oos_e) in enumerate(windows_idx):
             is_features = clean_features.iloc[is_s:is_e]
