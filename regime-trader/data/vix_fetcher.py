@@ -57,12 +57,21 @@ def fetch_vix_series(
         logger.info("VIX feature source: yfinance ^VIX daily (%d bars)", len(series))
         return series
 
+    # Fallback to VXX is a DIFFERENT instrument (ETF, not index) — flag loudly.
+    # Cross-platform divergence (Windows yfinance OK vs Linux yfinance missing)
+    # was traced to silent fallback here on 2026-04-25.
+    logger.warning(
+        "VIX fetch: yfinance ^VIX unavailable, falling back to Alpaca VXX ETF. "
+        "These are DIFFERENT series — backtests will diverge from yfinance runs. "
+        "Install yfinance to get the canonical ^VIX index."
+    )
     series = _try_alpaca_vxx(start, end, timeframe, data_client)
     if series is not None and len(series) > 20:
-        logger.info("VIX feature source: Alpaca VXX (%d bars)", len(series))
+        logger.warning("VIX feature source: Alpaca VXX (%d bars) — NOT canonical ^VIX",
+                       len(series))
         return series
 
-    logger.warning("VIX fetch failed from all sources — VIX features will be NaN")
+    logger.error("VIX fetch failed from all sources — VIX features will be NaN")
     return None
 
 

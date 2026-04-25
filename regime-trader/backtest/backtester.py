@@ -44,15 +44,21 @@ def _maybe_fetch_vix_bt(hmm_cfg: Dict, bars_index) -> "pd.Series | None":
     if not (hmm_cfg.get("use_vix_features", False)
             or hmm_cfg.get("use_credit_spread_features", False)):
         return None
-    try:
-        from data.vix_fetcher import fetch_vix_series
-        if bars_index is None or len(bars_index) == 0:
-            return None
-        start = (pd.Timestamp(bars_index[0]) - pd.Timedelta(days=5)).date().isoformat()
-        end   = (pd.Timestamp(bars_index[-1]) + pd.Timedelta(days=1)).date().isoformat()
-        return fetch_vix_series(start=start, end=end, timeframe="1Day")
-    except Exception:
+    from data.vix_fetcher import fetch_vix_series
+    if bars_index is None or len(bars_index) == 0:
         return None
+    start = (pd.Timestamp(bars_index[0]) - pd.Timedelta(days=5)).date().isoformat()
+    end   = (pd.Timestamp(bars_index[-1]) + pd.Timedelta(days=1)).date().isoformat()
+    series = fetch_vix_series(start=start, end=end, timeframe="1Day")
+    # Strict mode: if VIX features are requested but no source returned data,
+    # fail loudly — silent NaN propagation makes backtests non-comparable.
+    if series is None and hmm_cfg.get("use_vix_features", False):
+        raise RuntimeError(
+            "use_vix_features=True but VIX fetch returned None from all sources "
+            "(yfinance ^VIX and Alpaca VXX). Install yfinance or set "
+            "use_vix_features: false in config."
+        )
+    return series
 
 
 def _maybe_fetch_credit_bt(hmm_cfg: Dict, bars_index) -> "pd.Series | None":
@@ -302,14 +308,6 @@ class WalkForwardBacktester:
         if not syms:
             raise ValueError("None of the requested symbols are in the prices DataFrame.")
 
-        # ── AUDIT: hash inputs to diff Win vs Linux ──────────────────────────
-        import hashlib, platform, sys
-        _ph = hashlib.md5(pd.util.hash_pandas_object(prices, index=True).values).hexdigest()
-        print(f"AUDIT PRICES_HASH={_ph} shape={prices.shape} cols={list(prices.columns)} "
-              f"tz={prices.index.tz} first={prices.index[0]} last={prices.index[-1]}", flush=True)
-        print(f"AUDIT PLATFORM={platform.platform()} py={sys.version.split()[0]} "
-              f"tz_local={__import__('time').tzname}", flush=True)
-
         # ── Build synthetic OHLCV for every symbol ────────────────────────────
         ohlcv: Dict[str, pd.DataFrame] = {s: _ohlcv_from_close(prices[s]) for s in syms}
 
@@ -378,31 +376,9 @@ class WalkForwardBacktester:
         equity = self.initial_capital
         fold_results: List[WindowResult] = []
 
-        # AUDIT: hash full feature matrix + per-column
-        import hashlib as _hl
-        _fh = _hl.md5(pd.util.hash_pandas_object(clean_features).values).hexdigest()
-        print(f"AUDIT CLEAN_FEATURES_HASH={_fh} shape={clean_features.shape} "
-              f"cols={list(clean_features.columns)}", flush=True)
-        for _col in clean_features.columns:
-            _ch = _hl.md5(pd.util.hash_pandas_object(clean_features[_col]).values).hexdigest()
-            _s = clean_features[_col]
-            print(f"AUDIT COL {_col:<22s} hash={_ch} mean={_s.mean():.10f} std={_s.std():.10f} "
-                  f"first={_s.iloc[0]:.10f} last={_s.iloc[-1]:.10f}", flush=True)
-        # also hash VIX series if present
-        if _vix_bt is not None:
-            _vh = _hl.md5(pd.util.hash_pandas_object(_vix_bt).values).hexdigest()
-            print(f"AUDIT VIX_RAW_HASH={_vh} shape={_vix_bt.shape} "
-                  f"first={_vix_bt.iloc[0]:.6f} last={_vix_bt.iloc[-1]:.6f} "
-                  f"n_nan={_vix_bt.isna().sum()}", flush=True)
-        else:
-            print("AUDIT VIX_RAW=None", flush=True)
-
         for fold_id, (is_s, is_e, oos_s, oos_e) in enumerate(windows_idx):
             is_features = clean_features.iloc[is_s:is_e]
             oos_features = clean_features.iloc[oos_s:oos_e]
-            _ish = _hl.md5(pd.util.hash_pandas_object(is_features).values).hexdigest()
-            _osh = _hl.md5(pd.util.hash_pandas_object(oos_features).values).hexdigest()
-            print(f"AUDIT FOLD_{fold_id} IS_HASH={_ish} OOS_HASH={_osh}", flush=True)
 
             min_train = hmm_cfg.get("min_train_bars", 120)
             if len(is_features) < min_train:
