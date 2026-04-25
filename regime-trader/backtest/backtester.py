@@ -28,6 +28,7 @@ from __future__ import annotations
 import copy
 import logging
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -266,6 +267,8 @@ class WalkForwardBacktester:
         risk_config: Optional[Dict] = None,
         progress_callback=None,
         enforce_stops: bool = False,
+        dump_fold_models: Optional[Path] = None,
+        load_fold_models: Optional[Path] = None,
     ) -> BacktestResult:
         """
         Execute the full walk-forward backtest.
@@ -298,6 +301,16 @@ class WalkForwardBacktester:
         syms = [s for s in self.symbols if s in prices.columns]
         if not syms:
             raise ValueError("None of the requested symbols are in the prices DataFrame.")
+
+        # ── AUDIT: hash inputs to diff Win vs Linux ──────────────────────────
+        import hashlib, platform, sys
+        _ph = hashlib.md5(pd.util.hash_pandas_object(prices, index=True).values).hexdigest()
+        logger.info("AUDIT PRICES_HASH=%s shape=%s cols=%s tz=%s first=%s last=%s",
+                    _ph, prices.shape, list(prices.columns),
+                    prices.index.tz, prices.index[0], prices.index[-1])
+        logger.info("AUDIT PLATFORM=%s py=%s tz_local=%s",
+                    platform.platform(), sys.version.split()[0],
+                    __import__("time").tzname)
 
         # ── Build synthetic OHLCV for every symbol ────────────────────────────
         ohlcv: Dict[str, pd.DataFrame] = {s: _ohlcv_from_close(prices[s]) for s in syms}
@@ -367,9 +380,18 @@ class WalkForwardBacktester:
         equity = self.initial_capital
         fold_results: List[WindowResult] = []
 
+        # AUDIT: hash full feature matrix
+        import hashlib as _hl
+        _fh = _hl.md5(pd.util.hash_pandas_object(clean_features).values).hexdigest()
+        logger.info("AUDIT CLEAN_FEATURES_HASH=%s shape=%s cols=%s",
+                    _fh, clean_features.shape, list(clean_features.columns))
+
         for fold_id, (is_s, is_e, oos_s, oos_e) in enumerate(windows_idx):
             is_features = clean_features.iloc[is_s:is_e]
             oos_features = clean_features.iloc[oos_s:oos_e]
+            _ish = _hl.md5(pd.util.hash_pandas_object(is_features).values).hexdigest()
+            _osh = _hl.md5(pd.util.hash_pandas_object(oos_features).values).hexdigest()
+            logger.info("AUDIT FOLD_%d IS_HASH=%s OOS_HASH=%s", fold_id, _ish, _osh)
 
             min_train = hmm_cfg.get("min_train_bars", 120)
             if len(is_features) < min_train:
@@ -404,6 +426,8 @@ class WalkForwardBacktester:
                     fold_id, prices, ohlcv, is_features, oos_features,
                     equity, hmm_cfg, strat_cfg,
                     enforce_stops=enforce_stops,
+                    dump_fold_models=dump_fold_models,
+                    load_fold_models=load_fold_models,
                 )
             except Exception as exc:
                 logger.error("Fold %d failed: %s — skipping.", fold_id, exc, exc_info=True)
@@ -514,6 +538,8 @@ class WalkForwardBacktester:
         hmm_cfg: Dict,
         strat_cfg: Dict,
         enforce_stops: bool = False,
+        dump_fold_models: Optional[Path] = None,
+        load_fold_models: Optional[Path] = None,
     ) -> WindowResult:
         """
         Execute one walk-forward fold.
@@ -533,10 +559,25 @@ class WalkForwardBacktester:
             "stability_bars", "flicker_window", "flicker_threshold",
             "min_confidence", "min_covar",
         }
-        engine = HMMEngine(**{k: v for k, v in hmm_cfg.items() if k in _engine_kwargs})
-        engine.fit(is_features.values)
-        logger.info("Fold %d: HMM fitted  n_states=%d  BIC=%.2f",
-                    fold_id, engine._n_states, engine._training_bic)
+        if load_fold_models is not None:
+            import pickle
+            fpath = load_fold_models / f"fold_{fold_id:02d}.pkl"
+            with open(fpath, "rb") as fh:
+                engine = pickle.load(fh)
+            logger.info("Fold %d: HMM LOADED from %s  n_states=%d",
+                        fold_id, fpath, engine._n_states)
+        else:
+            engine = HMMEngine(**{k: v for k, v in hmm_cfg.items() if k in _engine_kwargs})
+            engine.fit(is_features.values)
+            logger.info("Fold %d: HMM fitted  n_states=%d  BIC=%.2f",
+                        fold_id, engine._n_states, engine._training_bic)
+            if dump_fold_models is not None:
+                import pickle
+                dump_fold_models.mkdir(parents=True, exist_ok=True)
+                fpath = dump_fold_models / f"fold_{fold_id:02d}.pkl"
+                with open(fpath, "wb") as fh:
+                    pickle.dump(engine, fh)
+                logger.info("Fold %d: HMM dumped to %s", fold_id, fpath)
 
         # ── 2. Build orchestrator from fitted regime_infos ─────────────────
         regime_infos = engine.get_all_regime_info()
