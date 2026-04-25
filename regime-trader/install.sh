@@ -100,7 +100,10 @@ info "Upgrading pip..."
 "$VENV_PIP" install --upgrade pip --quiet
 
 info "Installing from requirements.txt (this takes ~2 min on first run)..."
-"$VENV_PIP" install -r requirements.txt --quiet
+# requirements.txt is a complete pip-freeze with all transitive deps pinned,
+# so --no-deps is both faster and avoids resolver conflicts on declared metadata
+# (e.g. yfinance 1.3.0 wants websockets>=13 — fine, alpaca-py is the SDK we use).
+"$VENV_PIP" install --no-deps -r requirements.txt --quiet
 
 ok "All packages installed"
 
