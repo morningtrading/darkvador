@@ -2557,7 +2557,7 @@ def run_backtest(config: Dict, args: argparse.Namespace) -> None:
             hmm_config=hmm_config,
             strategy_config=strategy_config,
             progress_callback=_make_bt_progress(len(list(prices.columns))),
-            enforce_stops=getattr(args, "enforce_stops", False),
+            enforce_stops=getattr(args, "enforce_stops", True),
         )
     except Exception as exc:
         _print(f"[red]Backtest failed:[/red] {exc}", console)
@@ -3814,8 +3814,9 @@ def build_parser() -> argparse.ArgumentParser:
                        help="End date ISO-8601 (default: today)")
     bt_p.add_argument("--compare",        action="store_true",
                        help="Add benchmark comparison table")
-    bt_p.add_argument("--enforce-stops",  action="store_true", dest="enforce_stops",
-                       help="Enforce stop-loss exits during OOS simulation")
+    bt_p.add_argument("--no-enforce-stops", action="store_false", dest="enforce_stops",
+                       default=True,
+                       help="Disable stop-loss exits during OOS sim (default: enabled, matches live)")
     bt_p.add_argument("--stress-test",  action="store_true", dest="stress_test",
                        help="Run stress scenarios after the backtest")
     bt_p.add_argument("--telegram",    action="store_true",  default=None, dest="telegram",
