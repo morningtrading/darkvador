@@ -195,10 +195,12 @@ pip install -r requirements.txt
 > HMM EM algorithm converges to different local optima → different regime labels
 > → different trades → different P&L (~15–30% difference in total return is normal).
 >
-> **Canonical platform: Linux (native or WSL2). Reference results:**
-> `Total Return +159.21% | Sharpe 1.123 | MaxDD -15.53%` (commit `ed6d342`, 5 symbols, 2020–2026)
+> **Canonical platform: Linux (native or WSL2). Reference results** (stocks4 basket, 5 symbols, 2020–2026, conservative set, `enforce_stops=False`):
+> `Total Return +94.61% | Sharpe 0.860 | MaxDD -11.56%` (commit `f84b278`).
 >
-> Windows is fine for development and quick iteration.
+> Windows native on the same code/config gives `+118.55% / Sharpe 0.939 / MaxDD -17.2%` — divergence is from BLAS / floating-point accumulation differences in the HMM fit, NOT random-seed (random_state is already fixed). Cannot be reconciled without containerising the toolchain — not worth it.
+>
+> **Use Windows for development and quick iteration; use Linux for any number that goes into a decision.**
 
 ### 2. Credentials
 

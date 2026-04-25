@@ -1,3 +1,9 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# Canonical platform: Linux (native or WSL2) — see README.md "Cross-platform
+# reproducibility". Windows produces different backtest numbers (~20-25pp on
+# return) due to BLAS/float accumulation in the HMM fit. Decisions must be
+# made from Linux runs only.
+# ──────────────────────────────────────────────────────────────────────────────
 broker:
   paper_trading: true
   asset_group: stocks4
