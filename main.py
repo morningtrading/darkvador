@@ -475,6 +475,18 @@ def _print_run_config(
 
 
 
+def _resolve_config_set(set_name_arg: Optional[str]) -> str:
+    """Return the config set actually applied by load_config, in the same
+    resolution order: --set arg → config/active_set file → 'base'."""
+    if set_name_arg:
+        return set_name_arg
+    if _ACTIVE_SET_FILE.exists():
+        s = _ACTIVE_SET_FILE.read_text().strip()
+        if s:
+            return s
+    return "base"
+
+
 def _build_run_context(
     symbols: List[str],
     start_date: str,
@@ -483,6 +495,7 @@ def _build_run_context(
     output_dir: Path,
     asset_group: Optional[str] = None,
     n_folds: Optional[int] = None,
+    config_set: Optional[str] = None,
 ) -> Dict:
     """Build a dict of run metadata for config-control headers and JSON sidecar."""
     bt_cfg  = config.get("backtest", {})
@@ -511,6 +524,7 @@ def _build_run_context(
 
     return {
         "asset_group":         asset_group or "—",
+        "config_set":          config_set or "base",
         "symbols":             list(symbols),
         "symbol_descriptions": sym_descs,
         "start_date":          start_date,
@@ -2666,8 +2680,9 @@ def run_backtest(config: Dict, args: argparse.Namespace) -> None:
         end_date    = end_date,
         config      = config,
         output_dir  = output_dir,
-        asset_group = getattr(args, "asset_group", None),
+        asset_group = getattr(args, "asset_group", None) or config.get("broker", {}).get("asset_group"),
         n_folds     = result.metadata.get("n_folds"),
+        config_set  = _resolve_config_set(getattr(args, "config_set", None)),
     )
     pa.generate_report(report, print_to_console=True, run_context=run_context)
 

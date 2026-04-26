@@ -56,6 +56,21 @@ def _header() -> str:
     return f"<code>{BOT_NAME} · {_HOST} · {_IP} · {_OS} · #{_SHA}</code>"
 
 
+def _active_set_name() -> str:
+    """Read config/active_set; fallback to 'base' if absent or empty."""
+    p = ROOT / "config" / "active_set"
+    if p.exists():
+        s = p.read_text().strip()
+        if s:
+            return s
+    return "base"
+
+
+def _set_str(cfg_set: str) -> str:
+    """Format the set name as a bracketed suffix to a group label."""
+    return f"  [{cfg_set}]" if cfg_set else ""
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).strftime("%d %b %Y %H:%M UTC")
 
@@ -75,7 +90,7 @@ def _latest_backtest_dir() -> Optional[Path]:
 def format_test() -> str:
     return (
         f"{_header()}\n"
-        f"✅ <b>Regime Trader — connexion OK</b>  ·  <i>{_now()}</i>"
+        f"✅ <b>Regime Trader — connexion OK</b>  active set: <code>{_active_set_name()}</code>  ·  <i>{_now()}</i>"
     )
 
 
@@ -115,10 +130,9 @@ def format_backtest_summary() -> str:
     start  = str(s.get("start", ""))[:10]
     end    = str(s.get("end", ""))[:10]
 
-    set_str = f"  [{cfg_set}]" if cfg_set else ""
     return (
         f"{_header()}\n"
-        f"📊 <b>Backtest — {group}</b>{set_str}\n"
+        f"📊 <b>Backtest — {group}</b>{_set_str(cfg_set)}\n"
         f"<code>{symbols}</code>  ·  {start}→{end} ({folds} folds)\n"
         f"<b>{_pct(ret)}</b>  CAGR {_pct(cagr)}  ·  Sharpe <b>{sharpe:.2f}</b>  Calmar {calmar:.2f}  MaxDD {_pct(dd)}\n"
         f"{trades} trades  ·  {winr * 100:.1f}% win  ·  <i>{_now()}</i>"
@@ -144,14 +158,16 @@ def format_latest_trades(n: int = 5) -> str:
     date_col = next((c for c in ["exit_date", "date", "entry_date"] if c in df.columns), None)
 
     ctx_path = d / "run_context.json"
-    group = "—"
+    group, cfg_set = "—", ""
     if ctx_path.exists():
         try:
-            group = json.loads(ctx_path.read_text()).get("asset_group", "—")
+            c = json.loads(ctx_path.read_text())
+            group   = c.get("asset_group", "—")
+            cfg_set = c.get("config_set", "")
         except Exception:
             pass
 
-    lines = [_header(), f"📈 <b>Derniers trades — {group}</b>"]
+    lines = [_header(), f"📈 <b>Derniers trades — {group}</b>{_set_str(cfg_set)}"]
     for _, row in df.tail(n).iterrows():
         sym  = str(row[sym_col])  if sym_col  else "?"
         date = str(row[date_col])[:10] if date_col else "?"
@@ -183,14 +199,16 @@ def format_stress_summary() -> str:
     df = pd.read_csv(stress, index_col=0)
 
     ctx_path = stress.parent / "run_context.json"
-    group = "—"
+    group, cfg_set = "—", ""
     if ctx_path.exists():
         try:
-            group = json.loads(ctx_path.read_text()).get("asset_group", "—")
+            c = json.loads(ctx_path.read_text())
+            group   = c.get("asset_group", "—")
+            cfg_set = c.get("config_set", "")
         except Exception:
             pass
 
-    lines = [_header(), f"⚡ <b>Stress Test — {group}</b>"]
+    lines = [_header(), f"⚡ <b>Stress Test — {group}</b>{_set_str(cfg_set)}"]
     for scenario, row in df.iterrows():
         sharpe = row.get("sharpe", "?")
         dd     = row.get("max_drawdown", "?")
@@ -260,10 +278,20 @@ def format_regime_status() -> str:
             rows.append(f"{ic} {s['regime']:<8} {start} → {end}  ({days:>3}j)")
     body = "\n".join(rows)
 
+    ctx_path = d / "run_context.json"
+    asset_grp, cfg_set = "—", ""
+    if ctx_path.exists():
+        try:
+            c = json.loads(ctx_path.read_text())
+            asset_grp = c.get("asset_group", "—")
+            cfg_set   = c.get("config_set", "")
+        except Exception:
+            pass
+
     src = d.name.replace("backtest_", "")
     return (
         f"{_header()}\n"
-        f"{cur_icon} <b>Régime: {cur['regime']}</b>  depuis {cur['start'].strftime('%Y-%m-%d')}  ({cur_days}j)\n"
+        f"{cur_icon} <b>Régime: {cur['regime']}</b>  on <code>{asset_grp}</code>{_set_str(cfg_set)}  depuis {cur['start'].strftime('%Y-%m-%d')}  ({cur_days}j)\n"
         f"<i>Bars: {bar_freq}  ·  source: backtest {src}  ·  10 derniers segments :</i>\n"
         f"<pre>{body}</pre>\n"
         f"<i>{_now()}</i>"

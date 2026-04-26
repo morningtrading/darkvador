@@ -6,7 +6,7 @@
 # ──────────────────────────────────────────────────────────────────────────────
 broker:
   paper_trading: true
-  asset_group: stocks4   # symbols resolved from config/asset_groups.yaml
+  asset_group: stocks    # symbols resolved from config/asset_groups.yaml
   timeframe: 5Min
   base_url_paper: https://paper-api.alpaca.markets
   base_url_live: https://api.alpaca.markets
