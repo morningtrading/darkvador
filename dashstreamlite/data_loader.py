@@ -222,6 +222,13 @@ def compute_full_period_regimes(
       - features computed from `symbol` alone (no cross-symbol blending)
       - uses yfinance OHLCV (so the dashboard has no Alpaca dep)
     """
+    # Streamlit runs app.py from inside dashstreamlite/, so the repo root
+    # is not on sys.path and `core.*` / `data.*` imports would otherwise
+    # fail with ModuleNotFoundError.
+    import sys as _sys
+    _repo_root = str(ROOT)
+    if _repo_root not in _sys.path:
+        _sys.path.insert(0, _repo_root)
     try:
         from core.hmm_engine import HMMEngine
         from data.feature_engineering import FeatureEngineer
