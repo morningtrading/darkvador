@@ -1450,7 +1450,9 @@ class TradingSession:
         try:
             _proxy_live = hmm_cfg.get("regime_proxy") or None
             _ref_sym   = (_proxy_live if _proxy_live and _proxy_live in symbols else None) or symbols[0]
-            _tf        = broker_cfg.get("timeframe", "1Day")
+            # HMM bars at hmm.timeframe (decoupled from broker.timeframe so the
+            # 5-min loop doesn't feed 5-min features into a model trained daily).
+            _tf        = hmm_cfg.get("timeframe", "1Day")
             _pred_bars = _fetch_live_bars(self.client, symbols, _tf, n_bars=300)
             _ref_df    = _pred_bars.get(_ref_sym)
             if _ref_df is None:
@@ -1590,7 +1592,8 @@ class TradingSession:
         broker_cfg = self.config.get("broker", {})
         hmm_cfg    = self.config.get("hmm",    {})
         symbols    = _resolve_symbols(self.config, self.asset_group, self.symbols_arg)
-        timeframe  = broker_cfg.get("timeframe", "1Day")
+        timeframe  = broker_cfg.get("timeframe", "1Day")  # main-loop cadence
+        hmm_tf     = hmm_cfg.get("timeframe", "1Day")     # HMM model bar size
 
         from broker.order_executor import OrderExecutor
         executor = OrderExecutor(
@@ -1634,9 +1637,11 @@ class TradingSession:
                 break
 
             # ---- 1. Fetch latest bars ----------------------------------------
+            # Bars used here feed the HMM feature pipeline, so fetch at
+            # hmm_tf, not the main-loop cadence (broker.timeframe).
             try:
                 bars_by_symbol = _fetch_live_bars(
-                    self.client, symbols, timeframe, n_bars=300
+                    self.client, symbols, hmm_tf, n_bars=300
                 )
             except Exception as exc:
                 logger.error("Data fetch failed: %s -- pausing signals", exc)
