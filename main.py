@@ -1109,10 +1109,14 @@ class TradingSession:
         allocator_approach: str = "inverse_vol",
         no_portfolio_risk: bool = False,
         multi_strat_filter: Optional[List[str]] = None,
+        asset_group: Optional[str] = None,
+        symbols_arg: Optional[str] = None,
     ) -> None:
-        self.config  = config
-        self.dry_run = dry_run
-        self.console = _console()
+        self.config       = config
+        self.dry_run      = dry_run
+        self.asset_group  = asset_group
+        self.symbols_arg  = symbols_arg
+        self.console      = _console()
 
         # Component references (set during startup)
         self.client           = None
@@ -1162,7 +1166,10 @@ class TradingSession:
         risk_cfg     = self.config.get("risk",        {})
         monitor_cfg  = self.config.get("monitoring",  {})
 
-        symbols   = broker_cfg.get("symbols", ["SPY"])
+        # Same symbol resolution path as backtest: --symbols → --asset-group →
+        # broker.asset_group → registry. Trade mode used to read broker.symbols
+        # directly, which broke when settings.yaml dropped the dead symbols list.
+        symbols   = _resolve_symbols(self.config, self.asset_group, self.symbols_arg)
         timeframe = broker_cfg.get("timeframe", "1Day")
         paper     = broker_cfg.get("paper_trading", True)
 
@@ -1564,7 +1571,7 @@ class TradingSession:
         """
         broker_cfg = self.config.get("broker", {})
         hmm_cfg    = self.config.get("hmm",    {})
-        symbols    = broker_cfg.get("symbols",   ["SPY"])
+        symbols    = _resolve_symbols(self.config, self.asset_group, self.symbols_arg)
         timeframe  = broker_cfg.get("timeframe", "1Day")
 
         from broker.order_executor import OrderExecutor
@@ -2872,6 +2879,8 @@ def run_trading(
     allocator_approach: str = "inverse_vol",
     no_portfolio_risk: bool = False,
     multi_strat_filter: Optional[List[str]] = None,
+    asset_group: Optional[str] = None,
+    symbols_arg: Optional[str] = None,
 ) -> None:
     """
     Full live / paper trading loop.
@@ -2885,6 +2894,8 @@ def run_trading(
         allocator_approach=allocator_approach,
         no_portfolio_risk=no_portfolio_risk,
         multi_strat_filter=multi_strat_filter,
+        asset_group=asset_group,
+        symbols_arg=symbols_arg,
     )
 
     # Register shutdown signal handlers
@@ -4037,6 +4048,8 @@ def main() -> None:
             allocator_approach  = getattr(args, "allocator_approach", "inverse_vol"),
             no_portfolio_risk   = getattr(args, "no_portfolio_risk", False),
             multi_strat_filter  = _strat_filter,
+            asset_group         = getattr(args, "asset_group", None),
+            symbols_arg         = getattr(args, "symbols", None),
         )
 
     elif args.command == "backtest":
