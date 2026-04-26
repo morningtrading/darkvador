@@ -14,6 +14,27 @@ ALPACA_API_KEY / ALPACA_SECRET_KEY environment variables.
 
 from __future__ import annotations
 
+# ─── Platform guard — Linux/WSL only ────────────────────────────────────────
+# Windows is editor-only. Execution must happen on native Linux or inside WSL,
+# with the repo living in the WSL filesystem (not on a /mnt/<drive>/ Windows
+# mount, which has different I/O semantics, ownership, and symlink handling).
+import re as _re
+import sys as _sys
+from pathlib import Path as _Path
+if _sys.platform == "win32":
+    _sys.stderr.write(
+        "\nERROR: This is Windows native Python. Run under WSL2 or native Linux.\n"
+        "       Use Windows only as an editor; execute via a WSL shell.\n\n"
+    )
+    _sys.exit(2)
+_script_path = _Path(__file__).resolve().as_posix()
+if _re.match(r"^/mnt/[a-z]/", _script_path):
+    _sys.stderr.write(
+        f"\nERROR: Repo is on a Windows-mounted drive ({_script_path[:6]}).\n"
+        "       Move it to the WSL filesystem (e.g. /home/$USER/bot/darkvador) and re-run.\n\n"
+    )
+    _sys.exit(2)
+
 # ─── Force single-threaded BLAS for cross-platform reproducibility ──────────
 # MUST be set BEFORE numpy/scipy/hmmlearn are imported. Multi-threaded BLAS
 # (OpenBLAS, MKL, Accelerate) uses non-deterministic reduction orders that

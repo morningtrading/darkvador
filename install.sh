@@ -12,6 +12,24 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+# ── Platform guard — Linux/WSL only, repo must live in the Linux filesystem ──
+# Windows is editor-only. Refuse Git Bash / Cygwin / MSYS, and refuse running
+# from /mnt/<drive>/ (a Windows mount inside WSL) — both break venv symlinks
+# and produce different numerical results.
+_uname="$(uname -s)"
+if [ "$_uname" != "Linux" ]; then
+    echo "ERROR: install.sh must run under native Linux or WSL2 (uname=$_uname)." >&2
+    echo "       Windows is editor-only — open a WSL shell and re-run." >&2
+    exit 2
+fi
+case "$SCRIPT_DIR" in
+    /mnt/[a-z]/*)
+        echo "ERROR: Repo is on a Windows-mounted drive ($SCRIPT_DIR)." >&2
+        echo "       Move it to the WSL filesystem (e.g. /home/\$USER/bot/darkvador) and re-run." >&2
+        exit 2
+        ;;
+esac
+
 # ── colours ──────────────────────────────────────────────────────────────────
 GREEN='\033[1;32m'
 RED='\033[1;31m'
