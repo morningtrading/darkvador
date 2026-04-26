@@ -270,6 +270,7 @@ def compute_full_period_regimes(
         flicker_window  = int(params.get("flicker_window", 20)),
         flicker_threshold = int(params.get("flicker_threshold", 4)),
         min_confidence  = float(params.get("min_confidence", 0.62)),
+        label_mode      = str(params.get("label_mode", "sort")),
     )
     try:
         engine.fit(features_clean.values)

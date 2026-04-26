@@ -411,6 +411,7 @@ else:
         ("flicker_threshold", int(hmm_full.get("flicker_threshold", 4))),
         ("min_confidence",    float(hmm_full.get("min_confidence", 0.62))),
         ("covariance_type",   str(hmm_full.get("covariance_type", "full"))),
+        ("label_mode",        str(hmm_full.get("label_mode", "sort"))),
     )
 
     @st.cache_data(show_spinner="Training single-fold HMM on full period (~90s on first run)...")

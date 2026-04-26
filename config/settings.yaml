@@ -20,6 +20,11 @@ hmm:
                          #  main loop can tick intraday while regimes stay
                          #  macro (the original design intent — regimes are
                          #  not meant to flicker on 5-min noise).
+  label_mode: prototype  # "sort"      → label states by ascending mean return
+                         #  "prototype" → match states to fixed (vol_z, ret_z)
+                         #               targets so labels stay stable across
+                         #               retrains. Piste 3 default — see
+                         #               core/hmm_engine.py:_PROTOTYPES_5.
   n_candidates:
   - 5
   n_init: 10

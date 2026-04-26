@@ -928,6 +928,7 @@ def _train_hmm(
         min_train_bars     = hmm_cfg.get("min_train_bars", 252),
         min_covar          = _min_covar,
         covariance_type    = _cov_type,
+        label_mode         = hmm_cfg.get("label_mode", "sort"),
     )
     _n_cands = hmm_cfg.get("n_candidates", [3, 4, 5])
     _n_init  = hmm_cfg.get("n_init", 10)

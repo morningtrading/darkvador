@@ -153,6 +153,7 @@ class HMMEngine:
         flicker_threshold: int = 4,
         min_confidence: float = 0.55,
         min_covar: float = 1e-3,
+        label_mode: str = "sort",
     ) -> None:
         self.n_candidates: List[int] = n_candidates or [3, 4, 5, 6, 7]
         self.n_init: int = n_init
@@ -163,6 +164,10 @@ class HMMEngine:
         self.flicker_threshold: int = flicker_threshold
         self.min_confidence: float = min_confidence
         self.min_covar: float = min_covar
+        # "sort" (legacy)  → label states by ascending mean return
+        # "prototype"      → match states to fixed (vol_z, ret_z) targets
+        #                    so labels stay stable across retrains
+        self.label_mode: str = label_mode
 
         # Set after fit()
         self._model: Optional[hmm.GaussianHMM] = None
@@ -284,7 +289,10 @@ class HMMEngine:
             bic_scores, self._n_states, best_bic,
         )
 
-        self._label_states_by_return()
+        if self.label_mode == "prototype":
+            self._label_states_by_prototype()
+        else:
+            self._label_states_by_return()
         self._build_regime_info()
         self._reset_stability_state()
 
@@ -602,6 +610,7 @@ class HMMEngine:
                 "flicker_threshold": self.flicker_threshold,
                 "min_confidence": self.min_confidence,
                 "min_covar": self.min_covar,
+                "label_mode": self.label_mode,
             },
         }
         Path(path).parent.mkdir(parents=True, exist_ok=True)
@@ -816,6 +825,23 @@ class HMMEngine:
 
     # ── Private — labelling and metadata ──────────────────────────────────────
 
+    # Prototype targets in (vol_z, ret_z) space — same numbers the
+    # dashstreamlite Pareto plot draws. Tuned so:
+    #   CRASH    = high vol, very negative return
+    #   BEAR     = above-avg vol, negative return
+    #   NEUTRAL  = average vol, average return
+    #   BULL     = below-avg vol, positive return
+    #   EUPHORIA = very low vol, very positive return
+    # These are absolute z-score positions, NOT relative ranks, so the
+    # same label always maps to the same statistical state across retrains.
+    _PROTOTYPES_5: Dict[str, Tuple[float, float]] = {
+        "CRASH":    (+2.0, -2.0),
+        "BEAR":     (+1.0, -1.0),
+        "NEUTRAL":  ( 0.0,  0.0),
+        "BULL":     (-0.5, +1.0),
+        "EUPHORIA": (-1.0, +2.0),
+    }
+
     def _label_states_by_return(self) -> None:
         """
         Assign labels to HMM states by sorting their emission means on the
@@ -843,6 +869,84 @@ class HMMEngine:
             for rank, state_idx in enumerate(sorted_states)
         }
         logger.info("State labels (by ascending mean return): %s", log_lines)
+
+    def _label_states_by_prototype(self) -> None:
+        """
+        Assign labels to HMM states by minimum-distance matching to fixed
+        prototype targets in z-scored (volatility, return) feature space.
+        Hungarian assignment guarantees each state gets a unique label and
+        each label gets exactly one state.
+
+        Why this exists: the bot retrains the HMM weekly (and the backtester
+        retrains 17× per walk-forward run). Sort-by-return remaps labels at
+        every retrain — same statistical state can flip from BULL to NEUTRAL
+        across folds, polluting the regime-transition statistics. Prototype
+        matching anchors labels to absolute positions so a CRASH means the
+        same thing in every fold.
+
+        Falls back to _label_states_by_return if K isn't in the canonical
+        5-state mapping (the 3/4/6/7-state alternatives still use the legacy
+        sort) or if scipy isn't importable.
+        """
+        K = self._n_states
+        if K != 5:
+            logger.info(
+                "Prototype labelling only defined for K=5; got K=%d — "
+                "falling back to sort-by-return.", K
+            )
+            self._label_states_by_return()
+            return
+
+        try:
+            from scipy.optimize import linear_sum_assignment
+        except Exception as exc:
+            logger.warning(
+                "scipy not importable (%s) — falling back to sort-by-return.",
+                exc,
+            )
+            self._label_states_by_return()
+            return
+
+        mean_ret = self._model.means_[:, 0]           # log_ret_1 z
+        # realized_vol_20 lives at column 3 when extended_features are on
+        # (log_ret_1, realized_vol_5, log_ret_5, realized_vol_20, ...).
+        # For the minimal 2-feature setup [log_ret_1, realized_vol_20]
+        # it's at column 1.
+        if self._n_features > 3:
+            mean_vol = self._model.means_[:, 3]
+        elif self._n_features > 1:
+            mean_vol = self._model.means_[:, 1]
+        else:
+            # No vol feature available → fall back
+            logger.warning(
+                "n_features=%d — no vol feature for prototype matching; "
+                "falling back to sort-by-return.", self._n_features,
+            )
+            self._label_states_by_return()
+            return
+
+        labels = REGIME_LABELS[K]                     # 5 canonical labels
+        cost = np.zeros((K, len(labels)))
+        for s in range(K):
+            for j, lbl in enumerate(labels):
+                p_vol, p_ret = self._PROTOTYPES_5[lbl]
+                cost[s, j] = (mean_vol[s] - p_vol) ** 2 + (mean_ret[s] - p_ret) ** 2
+
+        row_ind, col_ind = linear_sum_assignment(cost)
+        self._state_to_label = {
+            int(row_ind[i]): labels[col_ind[i]]
+            for i in range(K)
+        }
+
+        log_lines = {
+            labels[col_ind[i]]: (
+                f"vol_z={mean_vol[row_ind[i]]:+.3f} "
+                f"ret_z={mean_ret[row_ind[i]]:+.3f} "
+                f"d²={cost[row_ind[i], col_ind[i]]:.3f}"
+            )
+            for i in range(K)
+        }
+        logger.info("State labels (by prototype matching): %s", log_lines)
 
     def _build_regime_info(self) -> None:
         """Populate :attr:`_regime_info` from emission means and _LABEL_META."""
