@@ -446,9 +446,13 @@ Stop formulas (used for position sizing, and for in-bar exit when enforced):
 
 If the HMM posterior is below `min_confidence`, the regime is flickering, or the new state is not yet confirmed, all position sizes are halved and leverage is dropped to 1.0×.
 
+**In plain English:** when the model isn't sure what kind of market we're in — either its confidence score is too low, the regime keeps flipping back and forth between bars, or we just switched regimes and haven't seen enough confirmation yet — the bot plays it safe. It cuts every position size in half and turns off leverage (so no borrowing, just cash positions). The idea is simple: if you're not sure, take smaller bets.
+
 ### Rebalance filter
 
 A rebalance is skipped when the new target weight is within `rebalance_threshold` (relative) of the current weight. Default in `balanced` set: 18%.
+
+**In plain English:** if the new target allocation is very close to what we already hold, the bot doesn't bother trading. For example, if we currently hold 10% in a stock and the new target is 11%, that's only a 10% relative change — below the 18% threshold — so we leave it alone. This avoids constantly placing tiny orders that just burn commissions and slippage without meaningfully changing the portfolio.
 
 ---
 
