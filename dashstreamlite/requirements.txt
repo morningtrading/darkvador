@@ -1,0 +1,4 @@
+# Extra deps for the Streamlit dashboard. Install on top of the main venv:
+#   .venv/bin/pip install -r dashstreamlite/requirements.txt
+streamlit==1.39.0
+plotly==5.24.1
