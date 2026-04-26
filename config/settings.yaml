@@ -7,10 +7,10 @@
 broker:
   paper_trading: true
   asset_group: stocks    # symbols resolved from config/asset_groups.yaml
-  timeframe: 1Day        # main-loop cadence: how often the bot wakes up to
-                         #  evaluate signals, check risk, post fills. For live
-                         #  trading consider 5Min so the risk manager runs
-                         #  intraday. Supported: 1Day, 1Hour, 5Min, 1Min.
+  timeframe: 5Min        # main-loop cadence: how often the bot wakes up to
+                         #  evaluate signals, check risk, post fills. Set to
+                         #  5Min for paper testing of intraday behaviour.
+                         #  Supported: 1Day, 1Hour, 5Min, 1Min.
   base_url_paper: https://paper-api.alpaca.markets
   base_url_live: https://api.alpaca.markets
   data_feed: iex
