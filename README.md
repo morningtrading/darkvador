@@ -28,11 +28,12 @@ Supporting layer runs in parallel:
 
 ## Multi-Strategy Mode
 
-The system can run several strategies in parallel under a single capital
-allocator and a portfolio-level risk manager. **Active strategies:** `hmm_regime`
-(S&P 500 regime detection) and `momentum_breakout` (large-cap tech). Other
-strategy implementations (mean-reversion, bond, commodity) are disabled by
-default as they underperform the current equity-focused universe.
+The multi-strategy framework can run several strategies in parallel under
+a single capital allocator and a portfolio-level risk manager.
+**Currently implemented:** `hmm_regime` only. The `strategies:` block in
+`config/settings.yaml` lists scaffolding for future strategies
+(`momentum_breakout`, `mean_reversion`, `bond_trend`, `commodity_momentum`,
+`crypto_momentum`) — all `enabled: false` until they're built.
 
 ```
 StrategyRegistry  ─►  CapitalAllocator  ─►  PortfolioRiskManager  ─►  Broker
@@ -51,9 +52,6 @@ python main.py trade --paper
 
 # Pick a different allocator approach
 python main.py trade --paper --allocator risk_parity
-
-# Restrict to a subset of strategies
-python main.py trade --paper --strategies hmm_regime,momentum_breakout
 
 # Backtest the multi-strategy stack
 python main.py backtest --multi-strat --allocator inverse_vol
@@ -78,8 +76,8 @@ The HMM maps its internal states to vol tiers by sorting them on expected volati
 |---|---|---|---|
 | `low_vol` | Calmest HMM state, trending | 95% of equity | 1.25× |
 | `mid_vol` (trend) | Transition, price above 50 EMA | 95% of equity | 1.0× |
-| `mid_vol` (no trend) | Transition, price below 50 EMA | 75% of equity | 1.0× |
-| `high_vol` | Most volatile HMM state | 75% of equity | 1.0× |
+| `mid_vol` (no trend) | Transition, price below 50 EMA | 70% of equity | 1.0× |
+| `high_vol` | Most volatile HMM state | 60% of equity | 1.0× |
 
 Allocations above are the **base** (`settings.yaml`). Config sets override them — see [Config sets](#config-sets).
 
@@ -190,16 +188,17 @@ pip install -r requirements.txt
 >
 > All published numbers come from Linux (native, WSL2, or VPS — all produce
 > identical, deterministic output). **Windows native is not supported for
-> evaluation.** ILP64 vs LP64 OpenBLAS builds make the HMM EM algorithm
-> converge to different local optima on Windows → different regime labels →
-> different trades → different P&L (~15–30% difference in total return is
-> typical). This is not random-seed instability (`random_state` is fixed); it
-> is a BLAS / floating-point accumulation difference and cannot be reconciled
-> without containerising the toolchain.
+> evaluation.** The Win/Linux divergence we tracked down was driven by the
+> **VIX feature**, not by HMM math: yfinance ^VIX downloads were
+> non-deterministic, with a silent fallback to the Alpaca VXX ETF (a
+> different instrument), so the two machines computed different feature
+> matrices and therefore different regime labels. Fixed by pinning yfinance
+> and raising on silent VXX fallback (commits `0c99539`, `91a3f9d`,
+> `787f7ac`). The HMM EM itself is deterministic with `random_state` fixed.
 >
-> **Reference results** (stocks4 basket, 5 symbols, 2020–2026, conservative
-> set, `enforce_stops=False`):
-> `Total Return +94.61% | Sharpe 0.860 | MaxDD -11.56%` (commit `f84b278`).
+> **Reference results** (stocks basket = SPY, QQQ, AAPL, MSFT, NVDA;
+> 2020-01-01 → 2026-04-26; balanced set; `enforce_stops=false`):
+> `Total Return +174.56% | CAGR +26.83% | Sharpe 1.08 | Calmar 1.68 | MaxDD -15.99%` (commit `51ea720`).
 >
 > If you must edit on Windows, use WSL2 for the venv, the install, and every
 > run. Do **not** operate on `.venv/` through the `\\wsl.localhost\…` Windows
@@ -273,7 +272,7 @@ Named parameter sets live in `config/sets/`. Each file contains only the overrid
 | Set | Focus | Key differences from base |
 |---|---|---|
 | `conservative` | Capital preservation | No leverage, stability=9 bars, high_vol alloc=45%, rebalance threshold=25% |
-| `balanced` | Recommended default | stability=7, flicker=4, min_confidence=0.62, high_vol=60%, slippage=10 bps |
+| `balanced` | Recommended default — current `active_set` | stability=7, flicker=4, min_confidence=0.62, high_vol=60%, slippage=5 bps |
 | `aggressive` | Max deployment | 1.5× leverage, stability=5, low_vol=100%, rebalance threshold=10% |
 
 ### Switching sets
@@ -321,10 +320,10 @@ Key HMM parameters explained:
 
 | Parameter | Default | Effect |
 |---|---|---|
-| `stability_bars` | 5 (base) / 7 (balanced) | Bars in same state required to confirm a regime flip |
-| `flicker_threshold` | 2 (base) / 4 (balanced) | Max regime changes in `flicker_window` before uncertainty mode |
-| `min_confidence` | 0.70 (base) / 0.62 (balanced) | HMM posterior floor — below this, position sizes are halved |
-| `n_candidates` | [3,4,5,6,7] | State counts tested; best selected by BIC |
+| `stability_bars` | 12 (base) / 7 (balanced) | Bars in same state required to confirm a regime flip |
+| `flicker_threshold` | 4 (base) / 4 (balanced) | Max regime changes in `flicker_window` before uncertainty mode |
+| `min_confidence` | 0.62 (base) / 0.62 (balanced) | HMM posterior floor — below this, position sizes are halved |
+| `n_candidates` | [5] | Single fixed state count for cross-machine reproducibility (was [3..7] historically) |
 
 ---
 
@@ -380,7 +379,7 @@ The high per-fold variance (CoV = 1.39) is a property of the short 63-bar OOS wi
 
 ## Risk controls
 
-Every order passes through `RiskManager.validate_signal()` — a 16-layer gate:
+Every order passes through `RiskManager.validate_signal()` — a multi-layer gate (~13 distinct checks; circuit-breaker rows below collapse to one check returning multiple states):
 
 | Check | Default | Breach behaviour |
 |---|---|---|
@@ -391,7 +390,8 @@ Every order passes through `RiskManager.validate_signal()` — a 16-layer gate:
 | Weekly drawdown reduce | 5% | Position sizes halved |
 | Daily drawdown reduce | 2% | Position sizes halved |
 | Max daily trades | 20 | Circuit breaker halt |
-| Stop-loss mandatory | — | Trade rejected if no stop provided |
+| Stop-loss mandatory | — | Trade rejected if no stop provided (sizing requires it; in-bar enforcement is opt-in — see Stop loss section) |
+| Bid-ask spread | configurable cap | Trade rejected if spread > cap |
 | Duplicate order | 60 s window | Trade rejected |
 | Max concurrent positions | 5 | Trade rejected |
 | 1% risk rule | 1% of equity / \|entry−stop\| | Size capped |
@@ -426,7 +426,15 @@ There is no traditional entry trigger. The position is opened as soon as the HMM
 
 ### Stop loss
 
-Every signal carries a stop computed from the current bar's ATR and EMA:
+The strategy attaches an ATR/EMA-based stop level to every signal so the
+RiskManager can size positions against a defined per-trade risk budget
+(`RiskManager.validate_signal` rejects any signal lacking a stop). **Stops
+are NOT enforced in the backtest by default** — `enforce_stops: false`,
+which aligns the backtest with the live broker's actual behaviour (commit
+`f84b278`). Pass `--enforce-stops` to the backtest CLI to enable in-bar
+stop-outs; bullish / EUPHORIA regimes remain exempt even then.
+
+Stop formulas (used for position sizing, and for in-bar exit when enforced):
 
 | Regime | Stop formula |
 |---|---|
