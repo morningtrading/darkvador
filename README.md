@@ -43,18 +43,20 @@ StrategyRegistry  ─►  CapitalAllocator  ─►  PortfolioRiskManager  ─►
 
 ### Quick start
 
+All commands assume the venv is active (`source .venv/bin/activate`).
+
 ```bash
 # Paper trade with all enabled strategies from settings.yaml + inverse-vol allocator
-py -3.12 main.py trade --paper
+python main.py trade --paper
 
 # Pick a different allocator approach
-py -3.12 main.py trade --paper --allocator risk_parity
+python main.py trade --paper --allocator risk_parity
 
 # Restrict to a subset of strategies
-py -3.12 main.py trade --paper --strategies hmm_regime,momentum_breakout
+python main.py trade --paper --strategies hmm_regime,momentum_breakout
 
 # Backtest the multi-strategy stack
-py -3.12 main.py backtest --multi-strat --allocator inverse_vol
+python main.py backtest --multi-strat --allocator inverse_vol
 ```
 
 Available `--allocator` values: `equal_weight`, `inverse_vol` (default),
@@ -142,7 +144,9 @@ regime-trader/
 
 ## Quick start
 
-### 1. Install (Linux / VPS / WSL2 — recommended)
+### 1. Install (Linux — only supported platform)
+
+Linux is the canonical and only supported platform — verified on **WSL2 (Ubuntu 24.04)** and a **Linux VPS**. The same `install.sh` produces an identical, working environment on both.
 
 **One-command install** — handles Python check, venv, packages, credentials, and tests:
 
@@ -173,34 +177,34 @@ sudo apt-get update && sudo apt-get install -y python3.12 python3.12-venv python
 
 ---
 
-### Manual install (any platform)
+### Manual install
 
 ```bash
-# Linux / macOS / WSL2
+# Linux (native or WSL2) — supported
 python3.12 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-
-# Windows (PowerShell)
-py -3.12 -m venv .venv
-.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
 ```
 
-> **⚠️ Cross-platform reproducibility**
+> **⚠️ Linux is the sole reference platform**
 >
-> Backtest results are **deterministic across Linux machines** (Ubuntu 24.04 native,
-> WSL2 Ubuntu-24.04, Linux VPS — all produce identical output). **Windows native
-> Python produces different results** due to ILP64 vs LP64 OpenBLAS builds: the
-> HMM EM algorithm converges to different local optima → different regime labels
-> → different trades → different P&L (~15–30% difference in total return is normal).
+> All published numbers come from Linux (native, WSL2, or VPS — all produce
+> identical, deterministic output). **Windows native is not supported for
+> evaluation.** ILP64 vs LP64 OpenBLAS builds make the HMM EM algorithm
+> converge to different local optima on Windows → different regime labels →
+> different trades → different P&L (~15–30% difference in total return is
+> typical). This is not random-seed instability (`random_state` is fixed); it
+> is a BLAS / floating-point accumulation difference and cannot be reconciled
+> without containerising the toolchain.
 >
-> **Canonical platform: Linux (native or WSL2). Reference results** (stocks4 basket, 5 symbols, 2020–2026, conservative set, `enforce_stops=False`):
+> **Reference results** (stocks4 basket, 5 symbols, 2020–2026, conservative
+> set, `enforce_stops=False`):
 > `Total Return +94.61% | Sharpe 0.860 | MaxDD -11.56%` (commit `f84b278`).
 >
-> Windows native on the same code/config gives `+118.55% / Sharpe 0.939 / MaxDD -17.2%` — divergence is from BLAS / floating-point accumulation differences in the HMM fit, NOT random-seed (random_state is already fixed). Cannot be reconciled without containerising the toolchain — not worth it.
->
-> **Use Windows for development and quick iteration; use Linux for any number that goes into a decision.**
+> If you must edit on Windows, use WSL2 for the venv, the install, and every
+> run. Do **not** operate on `.venv/` through the `\\wsl.localhost\…` Windows
+> mount — it corrupts symlinks and bakes wrong shebangs into the wrapper
+> scripts.
 
 ### 2. Credentials
 
@@ -237,7 +241,7 @@ The menu shows the active asset group and config set, and exposes all run modes 
 ### 4. Run a backtest from the CLI
 
 ```bash
-py -3.12 main.py backtest --asset-group stocks --start 2020-01-01 --compare
+python main.py backtest --asset-group stocks --start 2020-01-01 --compare
 ```
 
 `--compare` adds buy-and-hold and SMA-200 benchmark columns.
@@ -245,19 +249,19 @@ py -3.12 main.py backtest --asset-group stocks --start 2020-01-01 --compare
 ### 5. Run stress tests
 
 ```bash
-py -3.12 main.py stress --asset-group stocks --start 2019-01-01
+python main.py stress --asset-group stocks --start 2019-01-01
 ```
 
 ### 6. Start paper trading
 
 ```bash
-py -3.12 main.py trade --paper
+python main.py trade --paper
 ```
 
 ### 7. Run the test suite
 
 ```bash
-py -3.12 -m pytest tests/ -v
+python -m pytest tests/ -v
 ```
 
 ---
@@ -279,8 +283,8 @@ Named parameter sets live in `config/sets/`. Each file contains only the overrid
 **Via CLI for a single run** (does not change `active_set`):
 
 ```bash
-py -3.12 main.py backtest --asset-group stocks --start 2020-01-01 --set conservative
-py -3.12 main.py backtest --asset-group stocks --start 2020-01-01 --set aggressive
+python main.py backtest --asset-group stocks --start 2020-01-01 --set conservative
+python main.py backtest --asset-group stocks --start 2020-01-01 --set aggressive
 ```
 
 ### Adding a custom set
@@ -473,8 +477,7 @@ To switch from paper to live:
 ## Development notes
 
 - **Python version**: 3.12 required (`hmmlearn` has no wheels for 3.13+)
-- **Run scripts**: always use `py -3.12` on Windows, not `python`
-- **Windows terminal**: `Console(force_terminal=True, legacy_windows=False)` avoids `UnicodeEncodeError` on cp1252 terminals
+- **Run scripts**: activate the venv (`source .venv/bin/activate`) then use `python`
 - **Test isolation**: all broker tests use `MagicMock(spec=AlpacaClient)` — no real network calls
 - **Async in sync codebase**: WebSocket streams run via `asyncio.new_event_loop()` in daemon threads, keeping the main trading loop synchronous
 - **hmmlearn convergence warnings**: silenced at `ERROR` level — the tiny negative deltas (~1e-5) are floating-point noise, not real divergence
