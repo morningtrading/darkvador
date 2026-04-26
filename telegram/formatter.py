@@ -4,7 +4,9 @@ All messages: 2-4 lines max, longer lines, machine name included.
 """
 from __future__ import annotations
 import json
+import platform
 import socket
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -12,6 +14,46 @@ from typing import Optional
 ROOT = Path(__file__).resolve().parent.parent
 
 _HOST = socket.gethostname()
+BOT_NAME = ROOT.name
+
+
+def _local_ip() -> str:
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.settimeout(0.2)
+            s.connect(("10.255.255.255", 1))
+            return s.getsockname()[0]
+    except Exception:
+        return "?"
+
+
+def _os_short() -> str:
+    rel = platform.uname().release.lower()
+    if "microsoft" in rel or "wsl" in rel:
+        return "WSL2"
+    return platform.system()
+
+
+def _git_sha() -> str:
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=ROOT, capture_output=True, text=True, timeout=1,
+        )
+        if out.returncode == 0 and out.stdout.strip():
+            return out.stdout.strip()
+    except Exception:
+        pass
+    return "?"
+
+
+_IP  = _local_ip()
+_OS  = _os_short()
+_SHA = _git_sha()
+
+
+def _header() -> str:
+    return f"<code>{BOT_NAME} · {_HOST} · {_IP} · {_OS} · #{_SHA}</code>"
 
 
 def _now() -> str:
@@ -32,8 +74,8 @@ def _latest_backtest_dir() -> Optional[Path]:
 
 def format_test() -> str:
     return (
-        f"✅ <b>Regime Trader — connexion OK</b>\n"
-        f"Machine: <code>{_HOST}</code>  ·  {_now()}"
+        f"{_header()}\n"
+        f"✅ <b>Regime Trader — connexion OK</b>  ·  <i>{_now()}</i>"
     )
 
 
@@ -75,7 +117,8 @@ def format_backtest_summary() -> str:
 
     set_str = f"  [{cfg_set}]" if cfg_set else ""
     return (
-        f"📊 <b>Backtest — {group}</b>{set_str}  <code>{_HOST}</code>\n"
+        f"{_header()}\n"
+        f"📊 <b>Backtest — {group}</b>{set_str}\n"
         f"<code>{symbols}</code>  ·  {start}→{end} ({folds} folds)\n"
         f"<b>{_pct(ret)}</b>  CAGR {_pct(cagr)}  ·  Sharpe <b>{sharpe:.2f}</b>  Calmar {calmar:.2f}  MaxDD {_pct(dd)}\n"
         f"{trades} trades  ·  {winr * 100:.1f}% win  ·  <i>{_now()}</i>"
@@ -108,7 +151,7 @@ def format_latest_trades(n: int = 5) -> str:
         except Exception:
             pass
 
-    lines = [f"📈 <b>Derniers trades — {group}</b>  <code>{_HOST}</code>"]
+    lines = [_header(), f"📈 <b>Derniers trades — {group}</b>"]
     for _, row in df.tail(n).iterrows():
         sym  = str(row[sym_col])  if sym_col  else "?"
         date = str(row[date_col])[:10] if date_col else "?"
@@ -147,7 +190,7 @@ def format_stress_summary() -> str:
         except Exception:
             pass
 
-    lines = [f"⚡ <b>Stress Test — {group}</b>  <code>{_HOST}</code>"]
+    lines = [_header(), f"⚡ <b>Stress Test — {group}</b>"]
     for scenario, row in df.iterrows():
         sharpe = row.get("sharpe", "?")
         dd     = row.get("max_drawdown", "?")
@@ -179,6 +222,7 @@ def format_regime_status() -> str:
     recent = " ".join(r[:3] for r in df.iloc[-8:, 0].tolist())
 
     return (
-        f"{icon} <b>Régime: {last_regime}</b>  {last_date}  <code>{_HOST}</code>\n"
+        f"{_header()}\n"
+        f"{icon} <b>Régime: {last_regime}</b>  {last_date}\n"
         f"Récent: <code>{recent}</code>  ·  <i>{_now()}</i>"
     )
