@@ -145,9 +145,10 @@ strategies:
     weight_min: 0.05
     weight_max: 0.30
   mean_reversion_qqq_spy:
-    enabled: false           # OFF by default — frozen-baseline-1 still reproduces.
-                             # Flip to true (with hmm_regime also true) to enter
-                             # multi-strategy mode at next live launch.
+    enabled: true            # ACTIVATED — multi-strategy mode at next live launch
+                             # (combines with hmm_regime). Roll back via
+                             # `git checkout pre-mr-integration` or flip back to
+                             # false here if it misbehaves.
     symbols:                 # the orchestrator hard-requires both legs;
     - QQQ                    # missing one → no signals (it logs and skips).
     - SPY
