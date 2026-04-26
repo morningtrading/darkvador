@@ -244,6 +244,83 @@ def main() -> int:
                 dd  = max_drawdown(eq)
                 print(f"  {label:<28} {s:>+8.3f} {ar*100:>+8.2f}% {av*100:>+7.2f}% {dd*100:>+8.2f}%")
 
+    # ── Year-by-year breakdown ─────────────────────────────────────────────────
+    print("\n=== Year-by-year breakdown ===")
+    yearly = res["returns"].groupby(res["returns"].index.year).agg(
+        ann_return=lambda r: float((1.0 + r).prod() - 1.0),
+        ann_vol=lambda r: float(r.std() * np.sqrt(252)),
+        sharpe=lambda r: annualised_sharpe(r),
+        worst_day=lambda r: float(r.min()),
+        n_days="count",
+    )
+    print(f"  {'Year':>6} {'Return':>8} {'AnnVol':>8} {'Sharpe':>8} {'WorstDay':>10} {'Days':>6}")
+    print("  " + "-" * 56)
+    for yr, row in yearly.iterrows():
+        print(f"  {yr:>6} {row['ann_return']*100:>+7.2f}% {row['ann_vol']*100:>+7.2f}%"
+              f" {row['sharpe']:>+8.3f} {row['worst_day']*100:>+9.2f}% {int(row['n_days']):>6}")
+
+    # ── z-score decile analysis ────────────────────────────────────────────────
+    print("\n=== z-score decile diagnostic (sanity check that tilts work) ===")
+    # For each decile of |z|, report the next-day return contribution.
+    abs_z = res["weights"]["z"].abs()
+    nxt_ret = res["returns"]
+    common_zr = abs_z.index.intersection(nxt_ret.index)
+    if len(common_zr) > 100:
+        z_a = abs_z.loc[common_zr]
+        r_a = nxt_ret.loc[common_zr]
+        deciles = pd.qcut(z_a.dropna(), q=10, labels=False, duplicates="drop")
+        df_dec = pd.DataFrame({"abs_z": z_a, "ret": r_a, "decile": deciles}).dropna()
+        agg = df_dec.groupby("decile").agg(
+            avg_abs_z=("abs_z", "mean"),
+            avg_ret=("ret", "mean"),
+            hit_rate=("ret", lambda x: float((x > 0).mean())),
+            n=("ret", "count"),
+        )
+        print(f"  {'Decile':>7} {'avg|z|':>8} {'avgRet':>10} {'HitRate':>9} {'N':>6}")
+        print("  " + "-" * 47)
+        for dec, row in agg.iterrows():
+            print(f"  {int(dec):>7} {row['avg_abs_z']:>+7.2f}  "
+                  f"{row['avg_ret']*1e4:>+7.2f}bp {row['hit_rate']*100:>+7.1f}% "
+                  f"{int(row['n']):>6}")
+        print("  (Higher avg_ret in top deciles = larger tilts pay; look for monotone trend)")
+
+    # ── Parameter sensitivity (overfitting check) ──────────────────────────────
+    print("\n=== Parameter sensitivity (overfitting check) ===")
+    print(f"  {'lookback':>9} {'thresh':>7} {'driftLB':>8} {'Sharpe':>8} {'AnnRet':>9} {'MaxDD':>8}")
+    print("  " + "-" * 56)
+    grid = []
+    for lookback in [15, 20, 30, 45, 60]:
+        for threshold in [1.0, 1.5, 2.0]:
+            for drift_lookback in [126, 252, 504]:
+                cfg2 = MeanReversionQqqSpyConfig(
+                    allocation=cfg.allocation,
+                    lookback=lookback,
+                    threshold=threshold,
+                    drift_lookback=drift_lookback,
+                    max_tilt=cfg.max_tilt,
+                )
+                r2 = backtest(qqq, spy, cfg2)
+                grid.append({
+                    "lookback": lookback, "threshold": threshold,
+                    "drift_lookback": drift_lookback,
+                    "sharpe": r2["metrics"]["sharpe"],
+                    "ann_ret": r2["metrics"]["cagr"],
+                    "max_dd": r2["metrics"]["max_drawdown"],
+                })
+    grid_df = pd.DataFrame(grid).sort_values("sharpe", ascending=False)
+    # Show top 6 + bottom 3
+    for _, row in grid_df.head(6).iterrows():
+        print(f"  {int(row['lookback']):>9} {row['threshold']:>+6.2f} {int(row['drift_lookback']):>8}"
+              f"   {row['sharpe']:>+6.3f}  {row['ann_ret']*100:>+7.2f}% {row['max_dd']*100:>+7.2f}%")
+    print("  ...")
+    for _, row in grid_df.tail(3).iterrows():
+        print(f"  {int(row['lookback']):>9} {row['threshold']:>+6.2f} {int(row['drift_lookback']):>8}"
+              f"   {row['sharpe']:>+6.3f}  {row['ann_ret']*100:>+7.2f}% {row['max_dd']*100:>+7.2f}%")
+    print(f"\n  Sharpe range across {len(grid_df)} configs: "
+          f"[{grid_df['sharpe'].min():+.3f}, {grid_df['sharpe'].max():+.3f}]")
+    print(f"  Median Sharpe: {grid_df['sharpe'].median():+.3f}  "
+          f"(robust if median ≈ default-config Sharpe)")
+
     print()
     if decision_ok:
         print("VERDICT: candidate qualifies. Worth wiring into the multi-strategy framework.")
