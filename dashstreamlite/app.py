@@ -7,6 +7,7 @@ Run:
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -19,6 +20,7 @@ from plotly.subplots import make_subplots
 # from inside dashstreamlite/.
 from data_loader import (
     BotContext,
+    compute_full_period_regimes,
     fetch_proxy_prices,
     latest_backtest_dir,
     load_backtest_summary,
@@ -217,43 +219,26 @@ with c5:
 st.divider()
 
 
-# ── Main chart: HMM proxy price + regime overlay ──────────────────────────────
+# ── Chart-building helpers ────────────────────────────────────────────────────
 
-st.subheader(f"📈 {ctx.regime_proxy} (HMM proxy) — price & regimes")
 
-if not ctx.regime_proxy:
-    st.warning("No `hmm.regime_proxy` configured in settings.yaml.")
-elif regime_hist is None or regime_hist.empty:
-    st.warning("No regime_history.csv found in latest backtest directory.")
-else:
-    # Restrict to the requested history window.
-    cutoff = regime_hist.index.max() - pd.Timedelta(days=int(history_years * 365.25))
-    hist_view = regime_hist[regime_hist.index >= cutoff]
-    segs_view = [s for s in segments if s["end"] >= cutoff]
+def _build_regime_figure(prices_view, segs_view, proxy_label):
+    """Return a Plotly Figure for `proxy_label` price overlaid with the
+    coloured regime bands, transition vlines, and regime markers from
+    `segs_view`. `prices_view` is a pd.Series of close prices; may be empty
+    if yfinance failed."""
+    fig = make_subplots(rows=1, cols=1, shared_xaxes=True,
+                        specs=[[{"secondary_y": False}]])
 
-    # Fetch proxy price series for the same window via yfinance (does not
-    # touch Alpaca / bot credentials).
-    start_str = hist_view.index.min().strftime("%Y-%m-%d")
-    end_str   = (hist_view.index.max() + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
-    with st.spinner(f"Fetching {ctx.regime_proxy} prices from yfinance..."):
-        prices = fetch_proxy_prices(ctx.regime_proxy, start_str, end_str)
-
-    fig = make_subplots(
-        rows=1, cols=1, shared_xaxes=True,
-        specs=[[{"secondary_y": False}]],
-    )
-
-    # Coloured background bands per regime segment
+    # Coloured background bands per regime segment.
     for seg in segs_view:
         fig.add_vrect(
             x0=seg["start"], x1=seg["end"],
             fillcolor=REGIME_BG.get(seg["regime"], "rgba(148,163,184,0.20)"),
-            line_width=0,
-            layer="below",
-            annotation_text="",
+            line_width=0, layer="below",
         )
 
-    # Vertical markers at regime transitions (start of each new segment)
+    # Dotted vertical lines at regime transitions.
     if len(segs_view) > 1:
         for seg in segs_view[1:]:
             fig.add_vline(
@@ -262,35 +247,27 @@ else:
                 layer="below",
             )
 
-    if prices is not None and not prices.empty:
-        prices_view = prices[prices.index >= cutoff]
+    if prices_view is not None and not prices_view.empty:
         fig.add_trace(go.Scatter(
             x=prices_view.index,
             y=prices_view.values,
-            mode="lines",
-            name=ctx.regime_proxy,
+            mode="lines", name=proxy_label,
             line=dict(color="#0f172a", width=1.5),
             hovertemplate=(
                 f"%{{x|%Y-%m-%d}}<br>"
-                f"{ctx.regime_proxy} close: $%{{y:.2f}}<extra></extra>"
+                f"{proxy_label} close: $%{{y:.2f}}<extra></extra>"
             ),
             showlegend=False,
         ))
 
-        # Regime-change markers: one scatter trace per regime so the
-        # legend auto-builds. Each marker is positioned on the price
-        # line at the start of the segment it introduces.
-        prices_lookup = prices_view.copy()
-        prices_lookup = prices_lookup.sort_index()
+        # Regime-change markers — one Scatter per regime so the legend auto-builds.
         per_regime: dict = {}
-        for seg in segs_view[1:]:  # skip the very first segment (no transition into it)
-            # Snap to the closest *prior* price bar (handles weekends /
-            # holidays where the regime date has no matching trading day).
+        for seg in segs_view[1:]:
             try:
-                idx = prices_lookup.index.get_indexer([seg["start"]], method="ffill")[0]
+                idx = prices_view.index.get_indexer([seg["start"]], method="ffill")[0]
                 if idx == -1:
                     continue
-                px = float(prices_lookup.iloc[idx])
+                px = float(prices_view.iloc[idx])
             except Exception:
                 continue
             per_regime.setdefault(seg["regime"], {"x": [], "y": [], "hover": []})
@@ -302,13 +279,10 @@ else:
                 f"end: {seg['end'].strftime('%Y-%m-%d')}<br>"
                 f"duration: {seg['days']}j ({seg['bars']} bars)"
             )
-
         for regime, data in per_regime.items():
             fig.add_trace(go.Scatter(
-                x=data["x"],
-                y=data["y"],
-                mode="markers",
-                name=regime,
+                x=data["x"], y=data["y"],
+                mode="markers", name=regime,
                 marker=dict(
                     symbol=REGIME_SYMBOL.get(regime, "circle"),
                     color=REGIME_COLOURS.get(regime, "#94a3b8"),
@@ -320,19 +294,17 @@ else:
                 showlegend=True,
             ))
     else:
-        # No price line → regime bands still rendered, with a placeholder note.
         fig.add_annotation(
-            x=hist_view.index.min(),
+            x=segs_view[0]["start"] if segs_view else None,
             y=0.5, xref="x", yref="paper",
-            text=f"(yfinance returned no data for {ctx.regime_proxy} — bands only)",
+            text=f"(yfinance returned no data for {proxy_label} — bands only)",
             showarrow=False, font=dict(color="#9ca3af"),
         )
 
     fig.update_layout(
-        height=480,
+        height=460,
         margin=dict(l=10, r=10, t=10, b=10),
-        plot_bgcolor="#ffffff",
-        paper_bgcolor="#ffffff",
+        plot_bgcolor="#ffffff", paper_bgcolor="#ffffff",
         showlegend=True,
         legend=dict(
             orientation="h", yanchor="bottom", y=1.02,
@@ -344,26 +316,139 @@ else:
         yaxis=dict(showgrid=True, gridcolor="#f1f5f9", title=None),
         hovermode="closest",
     )
-    st.plotly_chart(fig, use_container_width=True, theme=None)
+    return fig
 
-    # Legend strip below the chart
-    legend_chunks = []
+
+def _regime_legend_strip(segs_view) -> str:
+    """HTML strip showing one coloured swatch per regime present in segs_view."""
     seen = []
     for seg in segs_view:
         if seg["regime"] not in seen:
             seen.append(seg["regime"])
+    chunks = []
     for r in seen:
         c = REGIME_COLOURS.get(r, "#94a3b8")
-        legend_chunks.append(
+        chunks.append(
             f"<span style='display:inline-block;width:0.7rem;height:0.7rem;"
             f"background:{c};border-radius:2px;margin-right:0.3rem;"
             f"vertical-align:middle;'></span>"
             f"<span style='margin-right:1rem;font-size:0.85rem;'>{r}</span>"
         )
-    st.markdown(
-        "<div style='margin-top:-0.5rem;'>" + "".join(legend_chunks) + "</div>",
-        unsafe_allow_html=True,
+    return "<div style='margin-top:-0.5rem;'>" + "".join(chunks) + "</div>"
+
+
+# ── Main charts: walk-forward (backtest) vs single-fold (full period) ────────
+
+if not ctx.regime_proxy:
+    st.warning("No `hmm.regime_proxy` configured in settings.yaml.")
+elif regime_hist is None or regime_hist.empty:
+    st.warning("No regime_history.csv found in latest backtest directory.")
+else:
+    # Common: history window cutoff and proxy price series.
+    cutoff = regime_hist.index.max() - pd.Timedelta(days=int(history_years * 365.25))
+    start_str = (regime_hist.index.min()).strftime("%Y-%m-%d")
+    end_str   = (regime_hist.index.max() + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+    with st.spinner(f"Fetching {ctx.regime_proxy} prices from yfinance..."):
+        prices_full = fetch_proxy_prices(ctx.regime_proxy, start_str, end_str)
+    prices_view = prices_full[prices_full.index >= cutoff] if prices_full is not None else None
+
+    # ── Panel 1: walk-forward (backtest) regimes ─────────────────────────────
+    st.subheader(
+        f"📈 {ctx.regime_proxy} — walk-forward regimes "
+        f"(17 folds × 252-bar IS / 63-bar OOS)"
     )
+    st.caption(
+        "Source: latest `savedresults/backtest_*/regime_history.csv`. "
+        "Each segment was predicted by a different HMM trained on the prior "
+        "12 months — so the `CRASH`/`BEAR`/etc. labels are **re-mapped per "
+        "fold** and not directly comparable across the timeline."
+    )
+    segs_bt_view = [s for s in segments if s["end"] >= cutoff]
+    fig_bt = _build_regime_figure(prices_view, segs_bt_view, ctx.regime_proxy)
+    st.plotly_chart(fig_bt, use_container_width=True, theme=None,
+                    key="chart_walk_forward")
+    st.markdown(_regime_legend_strip(segs_bt_view), unsafe_allow_html=True)
+
+    st.write("")  # vertical spacer
+
+    # ── Panel 2: single-fold (full-period) regimes ──────────────────────────
+    st.subheader(
+        f"🧠 {ctx.regime_proxy} — single-fold regimes "
+        f"(one HMM trained on the full period)"
+    )
+    st.caption(
+        "Same HMM hyper-parameters as the backtest, but trained **once** on "
+        f"all {start_str} → {end_str} bars. Labels stay consistent across "
+        "the timeline so a `CRASH` here means the same statistical state "
+        "everywhere. Quick check for whether the noise above came from "
+        "per-fold re-mapping. **First load takes ~90s** while the HMM fits."
+    )
+
+    # Hashable representation of the HMM params relevant to the fit.
+    bt_hmm_cfg = {}
+    if summary:
+        # Re-read the run_context for full hmm config that was applied.
+        try:
+            import json as _json
+            ctx_path = (latest_backtest_dir() or Path()) / "run_context.json"
+            if ctx_path.exists():
+                bt_hmm_cfg = _json.loads(ctx_path.read_text()) or {}
+        except Exception:
+            pass
+    # Use bot's actual hmm config from settings.yaml (loaded via load_bot_context
+    # only as a starting point — re-read to get full feature names list, etc.).
+    import yaml as _yaml
+    cfg_full = _yaml.safe_load((Path(__file__).resolve().parent.parent / "config" / "settings.yaml").read_text()) or {}
+    hmm_full = cfg_full.get("hmm", {}) or {}
+    hmm_params_repr = (
+        ("feature_names",     tuple(hmm_full.get("features", ["log_ret_1", "realized_vol_20"]))),
+        ("n_candidates",      tuple(hmm_full.get("n_candidates", [5]))),
+        ("n_init",            int(hmm_full.get("n_init", 10))),
+        ("min_train_bars",    int(hmm_full.get("min_train_bars", 252))),
+        ("stability_bars",    int(hmm_full.get("stability_bars", 7))),
+        ("flicker_window",    int(hmm_full.get("flicker_window", 20))),
+        ("flicker_threshold", int(hmm_full.get("flicker_threshold", 4))),
+        ("min_confidence",    float(hmm_full.get("min_confidence", 0.62))),
+        ("covariance_type",   str(hmm_full.get("covariance_type", "full"))),
+    )
+
+    @st.cache_data(show_spinner="Training single-fold HMM on full period (~90s on first run)...")
+    def _cached_full_period_regimes(symbol, start, end, params_repr):
+        return compute_full_period_regimes(symbol, start, end, params_repr)
+
+    sf_df = _cached_full_period_regimes(
+        ctx.regime_proxy, start_str, end_str, hmm_params_repr,
+    )
+
+    if sf_df is None or sf_df.empty:
+        st.error(
+            "Single-fold HMM training failed. yfinance may have returned "
+            "incomplete data, or the feature pipeline could not produce "
+            "enough clean rows. Try a longer history window."
+        )
+    else:
+        sf_segments = regime_segments(sf_df)
+        sf_segs_view = [s for s in sf_segments if s["end"] >= cutoff]
+        fig_sf = _build_regime_figure(prices_view, sf_segs_view, ctx.regime_proxy)
+        st.plotly_chart(fig_sf, use_container_width=True, theme=None,
+                        key="chart_single_fold")
+        st.markdown(_regime_legend_strip(sf_segs_view), unsafe_allow_html=True)
+
+        # Side-by-side stat: how often do the two views agree?
+        try:
+            common = regime_hist.join(sf_df.rename(columns={"regime": "regime_sf"}),
+                                      how="inner")
+            agree_pct = (common["regime"] == common["regime_sf"]).mean() * 100
+            n_changes_bt = sum(1 for _ in segs_bt_view) - 1
+            n_changes_sf = sum(1 for _ in sf_segs_view) - 1
+            st.caption(
+                f"**Agreement** between the two regime views on overlapping "
+                f"dates: **{agree_pct:.1f}%**. "
+                f"Walk-forward: {n_changes_bt} transitions in window. "
+                f"Single-fold: {n_changes_sf} transitions in window."
+            )
+        except Exception:
+            pass
 
 
 st.divider()

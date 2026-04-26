@@ -184,6 +184,98 @@ def regime_segments(regime_history: pd.DataFrame) -> list[dict]:
 
 # ── Price data for the regime proxy (yfinance) ────────────────────────────────
 
+def fetch_proxy_ohlcv(symbol: str, start: str, end: str) -> Optional[pd.DataFrame]:
+    """OHLCV DataFrame for the proxy via yfinance, with lowercased column
+    names so it can be fed straight to FeatureEngineer.build_feature_matrix.
+    Returns None on failure rather than raising."""
+    try:
+        import yfinance as yf
+        df = yf.download(
+            symbol, start=start, end=end,
+            progress=False, auto_adjust=True, threads=False,
+        )
+        if df is None or df.empty:
+            return None
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
+        df.columns = [str(c).lower() for c in df.columns]
+        df.index = pd.to_datetime(df.index).tz_localize(None)
+        return df
+    except Exception:
+        return None
+
+
+def compute_full_period_regimes(
+    symbol: str,
+    start: str,
+    end: str,
+    hmm_params_repr: tuple,
+) -> Optional[pd.DataFrame]:
+    """Train ONE HMM on the full [start, end] window for `symbol` and return
+    a DataFrame[date, regime] with one label per bar.
+
+    Differences from the bot's walk-forward backtest:
+      - single fold, single label mapping over the entire timeline
+      - features computed from `symbol` alone (no cross-symbol blending)
+      - uses yfinance OHLCV (so the dashboard has no Alpaca dep)
+
+    `hmm_params_repr` must be a hashable tuple-of-tuples representation of
+    the relevant HMM config so streamlit caching can key on it.
+    """
+    try:
+        from core.hmm_engine import HMMEngine
+        from data.feature_engineering import FeatureEngineer
+    except Exception:
+        return None
+
+    bars = fetch_proxy_ohlcv(symbol, start, end)
+    if bars is None or bars.empty:
+        return None
+    needed = {"close", "high", "low"}
+    if not needed.issubset(bars.columns):
+        return None
+
+    params = dict(hmm_params_repr)
+
+    fe = FeatureEngineer()
+    try:
+        features = fe.build_feature_matrix(
+            bars,
+            feature_names=list(params.get("feature_names", ["log_ret_1", "realized_vol_20"])),
+        )
+    except Exception:
+        return None
+    features_clean = features.dropna()
+
+    min_train = int(params.get("min_train_bars", 252))
+    if len(features_clean) < min_train:
+        return None
+
+    engine = HMMEngine(
+        n_candidates    = list(params.get("n_candidates", [5])),
+        n_init          = int(params.get("n_init", 10)),
+        covariance_type = str(params.get("covariance_type", "full")),
+        min_train_bars  = min_train,
+        stability_bars  = int(params.get("stability_bars", 7)),
+        flicker_window  = int(params.get("flicker_window", 20)),
+        flicker_threshold = int(params.get("flicker_threshold", 4)),
+        min_confidence  = float(params.get("min_confidence", 0.62)),
+    )
+    try:
+        engine.fit(features_clean.values)
+    except Exception:
+        return None
+
+    states = engine.predict_regime_filtered(features_clean.values)
+    if not states:
+        return None
+
+    return pd.DataFrame(
+        {"regime": [s.label for s in states]},
+        index=features_clean.index[: len(states)],
+    )
+
+
 def fetch_proxy_prices(symbol: str, start: str, end: str) -> Optional[pd.Series]:
     """Daily close-price series for the regime proxy via yfinance.
     Returns None on failure rather than raising — the dashboard degrades
