@@ -966,16 +966,25 @@ def _load_or_train_hmm(
     if not needs_train:
         try:
             engine = HMMEngine.load(str(_MODEL_PATH))
-            age_days = (
-                dt.datetime.now() -
-                dt.datetime.fromtimestamp(_MODEL_PATH.stat().st_mtime)
-            ).days
-            _print(
-                f"  Loaded HMM model from {_MODEL_PATH}  "
-                f"(age={age_days}d  states={engine._n_states})",
-                console, style="dim",
-            )
-            return engine
+            allowed = list(hmm_cfg.get("n_candidates", []) or [])
+            if allowed and engine._n_states not in allowed:
+                logger.warning(
+                    "Cached HMM has %d states but config n_candidates=%s — "
+                    "retraining to match (cached model produces a different "
+                    "label set, e.g. WEAK_BULL vs canonical BULL/NEUTRAL).",
+                    engine._n_states, allowed,
+                )
+            else:
+                age_days = (
+                    dt.datetime.now() -
+                    dt.datetime.fromtimestamp(_MODEL_PATH.stat().st_mtime)
+                ).days
+                _print(
+                    f"  Loaded HMM model from {_MODEL_PATH}  "
+                    f"(age={age_days}d  states={engine._n_states})",
+                    console, style="dim",
+                )
+                return engine
         except Exception as exc:
             logger.warning("Failed to load HMM model: %s  -- retraining", exc)
 
