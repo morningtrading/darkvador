@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+import numpy as np
 import pandas as pd
 import yaml
 
@@ -286,6 +287,71 @@ def compute_full_period_regimes(
         ),
         None,
     )
+
+
+def load_hmm_state_stats() -> Optional[pd.DataFrame]:
+    """Read models/hmm.pkl and extract a per-state stats DataFrame:
+    columns = [state_id, label, ret_z, vol_z, occupancy_pct]
+    where ret_z and vol_z are z-scored mean log_ret_1 / realized_vol_20.
+    Returns None if the model is missing or unreadable."""
+    path = ROOT / "models" / "hmm.pkl"
+    if not path.exists():
+        return None
+    try:
+        import pickle
+        with open(path, "rb") as f:
+            payload = pickle.load(f)
+        model            = payload["model"]
+        n_features       = int(payload.get("n_features", 0))
+        state_to_label   = payload.get("state_to_label", {}) or {}
+    except Exception:
+        return None
+
+    means = model.means_  # shape (n_states, n_features)
+    n_states = means.shape[0]
+
+    rows = []
+    for s in range(n_states):
+        ret_z = float(means[s, 0])
+        # realized_vol_20 is at column index 3 if extended features are on
+        # (log_ret_1, realized_vol_5, log_ret_5, realized_vol_20, ...).
+        # When fewer features were used, fall back to the diagonal of the
+        # emission covariance for col 0 as a vol proxy.
+        if n_features > 3:
+            vol_z = float(means[s, 3])
+        else:
+            try:
+                cov = model.covars_
+                # GaussianHMM with covariance_type="full" → covars_ shape (K, F, F)
+                if cov.ndim == 3:
+                    vol_z = float(np.sqrt(cov[s, 0, 0]))
+                else:
+                    vol_z = float(np.sqrt(cov[s, 0]))
+            except Exception:
+                vol_z = 0.0
+        rows.append({
+            "state_id":  s,
+            "label":     state_to_label.get(s, f"S{s}"),
+            "ret_z":     ret_z,
+            "vol_z":     vol_z,
+        })
+
+    df = pd.DataFrame(rows)
+
+    # Occupancy: % of training bars assigned to each state, if a recent
+    # backtest's regime_history is available (it covers the same labels).
+    bt_dir = latest_backtest_dir()
+    if bt_dir is not None:
+        rh = load_regime_history(bt_dir)
+        if rh is not None and not rh.empty:
+            counts = rh["regime"].value_counts(normalize=True) * 100
+            df["occupancy_pct"] = df["label"].map(counts).fillna(0.0)
+        else:
+            df["occupancy_pct"] = 0.0
+    else:
+        df["occupancy_pct"] = 0.0
+
+    return df
 
 
 def fetch_proxy_prices(symbol: str, start: str, end: str) -> Optional[pd.Series]:

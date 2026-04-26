@@ -26,6 +26,7 @@ from data_loader import (
     load_backtest_summary,
     load_bot_context,
     load_equity_curve,
+    load_hmm_state_stats,
     load_regime_history,
     load_state_snapshot,
     regime_segments,
@@ -520,6 +521,120 @@ with right:
             """,
             unsafe_allow_html=True,
         )
+
+
+st.divider()
+
+
+# ── Pareto: HMM state distribution in (vol_z, ret_z) space ────────────────────
+
+st.subheader("📍 HMM state distribution — Pareto in (vol_z, ret_z) space")
+st.caption(
+    "Each point is one of the HMM's discrete states, plotted by its emission "
+    "mean on `realized_vol_20` (x-axis, z-scored) and `log_ret_1` (y-axis, "
+    "z-scored). The colour is the **current** label assigned to that state. "
+    "Crosses (`✕`) are the prototype targets piste 3 will use to assign "
+    "labels — a state should sit close to its prototype if the labelling is "
+    "coherent."
+)
+
+state_stats = load_hmm_state_stats()
+
+if state_stats is None or state_stats.empty:
+    st.info("No HMM model found at `models/hmm.pkl` (train the bot once first).")
+else:
+    # Prototype targets in z-score space — same values piste 3 will use.
+    PROTOTYPES = {
+        "CRASH":    (+2.0, -2.0),   # high vol, very negative return
+        "BEAR":     (+1.0, -1.0),
+        "NEUTRAL":  ( 0.0,  0.0),
+        "BULL":     (-0.5, +1.0),   # low vol, positive return
+        "EUPHORIA": (-1.0, +2.0),   # very low vol, very positive return
+    }
+
+    fig_p = go.Figure()
+
+    # Plot each state as a labelled marker, coloured by its current label.
+    for _, row in state_stats.iterrows():
+        lbl = row["label"]
+        c   = REGIME_COLOURS.get(lbl, "#94a3b8")
+        sym = REGIME_SYMBOL.get(lbl, "circle")
+        occ = row.get("occupancy_pct", 0.0)
+        size = max(18, min(60, 18 + occ * 1.5))  # bigger marker for higher occupancy
+        fig_p.add_trace(go.Scatter(
+            x=[row["vol_z"]],
+            y=[row["ret_z"]],
+            mode="markers+text",
+            marker=dict(
+                size=size,
+                symbol=sym,
+                color=c,
+                line=dict(color="#0f172a", width=1.5),
+            ),
+            text=[f"S{int(row['state_id'])}: {lbl}"],
+            textposition="top center",
+            textfont=dict(size=11, color="#0f172a"),
+            hovertemplate=(
+                f"<b>State {int(row['state_id'])}</b><br>"
+                f"label: {lbl}<br>"
+                f"vol_z: {row['vol_z']:+.3f}<br>"
+                f"ret_z: {row['ret_z']:+.3f}<br>"
+                f"occupancy: {occ:.1f}%<extra></extra>"
+            ),
+            showlegend=False,
+        ))
+
+    # Plot the prototype targets as light reference markers.
+    for name, (vol_p, ret_p) in PROTOTYPES.items():
+        fig_p.add_trace(go.Scatter(
+            x=[vol_p], y=[ret_p],
+            mode="markers+text",
+            marker=dict(
+                size=14, symbol="x-thin",
+                color=REGIME_COLOURS.get(name, "#94a3b8"),
+                line=dict(color=REGIME_COLOURS.get(name, "#94a3b8"), width=2.5),
+            ),
+            text=[f"  {name} target"],
+            textposition="middle right",
+            textfont=dict(size=9, color="#64748b"),
+            opacity=0.55,
+            hovertemplate=f"prototype: {name}<br>vol_z={vol_p:+.1f}<br>ret_z={ret_p:+.1f}<extra></extra>",
+            showlegend=False,
+        ))
+
+    # Reference cross at (0, 0) — the average market regime.
+    fig_p.add_hline(y=0, line=dict(color="#e2e8f0", width=1, dash="solid"), layer="below")
+    fig_p.add_vline(x=0, line=dict(color="#e2e8f0", width=1, dash="solid"), layer="below")
+
+    fig_p.update_layout(
+        height=520,
+        margin=dict(l=20, r=20, t=10, b=20),
+        plot_bgcolor="#ffffff", paper_bgcolor="#ffffff",
+        xaxis=dict(
+            title="realized_vol_20  (z-score)  →  more volatile",
+            zeroline=True, zerolinecolor="#e2e8f0",
+            showgrid=True, gridcolor="#f1f5f9",
+            range=[-2.5, 3.0],
+        ),
+        yaxis=dict(
+            title="log_ret_1  (z-score)  →  higher mean return",
+            zeroline=True, zerolinecolor="#e2e8f0",
+            showgrid=True, gridcolor="#f1f5f9",
+            range=[-2.5, 2.5],
+        ),
+        showlegend=False,
+        hovermode="closest",
+    )
+    st.plotly_chart(fig_p, use_container_width=True, theme=None,
+                    key="chart_pareto")
+
+    # Stats table below
+    show = state_stats[["state_id", "label", "ret_z", "vol_z", "occupancy_pct"]].copy()
+    show.columns = ["State", "Label", "Mean log_ret (z)", "Mean vol_20 (z)", "Occupancy (%)"]
+    show["Mean log_ret (z)"] = show["Mean log_ret (z)"].map(lambda v: f"{v:+.3f}")
+    show["Mean vol_20 (z)"]  = show["Mean vol_20 (z)"].map(lambda v: f"{v:+.3f}")
+    show["Occupancy (%)"]    = show["Occupancy (%)"].map(lambda v: f"{v:.1f}")
+    st.dataframe(show, hide_index=True, use_container_width=True)
 
 
 # ── Footer ────────────────────────────────────────────────────────────────────
