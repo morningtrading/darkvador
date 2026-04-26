@@ -1359,14 +1359,28 @@ class TradingSession:
                 syms = scfg.get("symbols") or symbols
                 self._strat_symbols[sname] = syms
 
-                orch = StrategyOrchestrator(
-                    config              = self.config,
-                    regime_infos        = self.hmm_engine.get_all_regime_info(),
-                    min_confidence      = hmm_cfg.get("min_confidence", 0.55),
-                    rebalance_threshold = self.config.get("strategy", {}).get(
-                        "rebalance_threshold", 0.10
-                    ),
-                )
+                # Dispatch by strategy name. Regime-independent strategies
+                # use their own orchestrator; everything else falls back to
+                # the HMM-driven StrategyOrchestrator (existing behaviour).
+                if sname == "mean_reversion_qqq_spy":
+                    from strategies.mean_reversion_orchestrator import MeanReversionOrchestrator
+                    orch = MeanReversionOrchestrator(
+                        config         = self.config,
+                        allocation     = float(scfg.get("allocation",     0.30)),
+                        lookback       = int(scfg.get("lookback",        30)),
+                        drift_lookback = int(scfg.get("drift_lookback", 252)),
+                        threshold      = float(scfg.get("threshold",     1.5)),
+                        max_tilt       = float(scfg.get("max_tilt",      0.40)),
+                    )
+                else:
+                    orch = StrategyOrchestrator(
+                        config              = self.config,
+                        regime_infos        = self.hmm_engine.get_all_regime_info(),
+                        min_confidence      = hmm_cfg.get("min_confidence", 0.55),
+                        rebalance_threshold = self.config.get("strategy", {}).get(
+                            "rebalance_threshold", 0.10
+                        ),
+                    )
                 rm = RiskManager(
                     initial_equity          = per_strat_equity,
                     max_risk_per_trade      = risk_cfg.get("max_risk_per_trade",   0.01),
