@@ -51,7 +51,17 @@ REGIME_COLOURS = {
     "STRONG_BEAR": "#dc2626",
     "CRASH":       "#7f1d1d",
 }
-REGIME_BG = {k: v + "33" for k, v in REGIME_COLOURS.items()}  # ~20% alpha
+
+
+def _hex_to_rgba(hex_colour: str, alpha: float) -> str:
+    """Convert a #RRGGBB hex string to plotly's rgba(r,g,b,a) form.
+    Plotly's fillcolor validator rejects 8-digit hex (#RRGGBBAA)."""
+    h = hex_colour.lstrip("#")
+    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    return f"rgba({r},{g},{b},{alpha:.2f})"
+
+
+REGIME_BG = {k: _hex_to_rgba(v, 0.20) for k, v in REGIME_COLOURS.items()}
 
 REGIME_ICONS = {
     "EUPHORIA":    "🚀",
@@ -223,7 +233,7 @@ else:
     for seg in segs_view:
         fig.add_vrect(
             x0=seg["start"], x1=seg["end"],
-            fillcolor=REGIME_BG.get(seg["regime"], "#94a3b833"),
+            fillcolor=REGIME_BG.get(seg["regime"], "rgba(148,163,184,0.20)"),
             line_width=0,
             layer="below",
             annotation_text="",
