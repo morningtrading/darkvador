@@ -460,7 +460,8 @@ class Dashboard:
             if self._asset_group:
                 parts_line.append(f"[bold]{self._asset_group}[/bold]")
                 if self._config_set:
-                    parts_line.append(f"  [yellow][{self._config_set}][/yellow]")
+                    # Escape literal [ ] so Rich does not parse them as markup.
+                    parts_line.append(f"  [yellow]\\[{self._config_set}][/yellow]")
                 if self._regime_proxy:
                     parts_line.append(f"  [dim]· HMM:[/dim] [cyan]{self._regime_proxy}[/cyan]")
                 parts_line.append("  [dim]│[/dim]  ")
@@ -765,7 +766,7 @@ class Dashboard:
     def _build_layout(self) -> Layout:
         layout = Layout(name="root")
         layout.split_column(
-            Layout(name="header",         size=3),
+            Layout(name="header",         size=4),
             Layout(name="regime",         size=5),
             Layout(name="portfolio",      size=5),
             Layout(name="positions",      minimum_size=5),
