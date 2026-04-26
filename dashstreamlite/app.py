@@ -61,7 +61,21 @@ def _hex_to_rgba(hex_colour: str, alpha: float) -> str:
     return f"rgba({r},{g},{b},{alpha:.2f})"
 
 
-REGIME_BG = {k: _hex_to_rgba(v, 0.20) for k, v in REGIME_COLOURS.items()}
+REGIME_BG = {k: _hex_to_rgba(v, 0.35) for k, v in REGIME_COLOURS.items()}
+
+# Distinct plotly symbol per regime — picked so bullish entries point up,
+# bearish point down, and extreme states get a special glyph.
+REGIME_SYMBOL = {
+    "EUPHORIA":    "star",
+    "STRONG_BULL": "triangle-up",
+    "BULL":        "triangle-up",
+    "WEAK_BULL":   "triangle-up-open",
+    "NEUTRAL":     "circle",
+    "WEAK_BEAR":   "triangle-down-open",
+    "BEAR":        "triangle-down",
+    "STRONG_BEAR": "triangle-down",
+    "CRASH":       "x",
+}
 
 REGIME_ICONS = {
     "EUPHORIA":    "🚀",
@@ -260,7 +274,51 @@ else:
                 f"%{{x|%Y-%m-%d}}<br>"
                 f"{ctx.regime_proxy} close: $%{{y:.2f}}<extra></extra>"
             ),
+            showlegend=False,
         ))
+
+        # Regime-change markers: one scatter trace per regime so the
+        # legend auto-builds. Each marker is positioned on the price
+        # line at the start of the segment it introduces.
+        prices_lookup = prices_view.copy()
+        prices_lookup = prices_lookup.sort_index()
+        per_regime: dict = {}
+        for seg in segs_view[1:]:  # skip the very first segment (no transition into it)
+            # Snap to the closest *prior* price bar (handles weekends /
+            # holidays where the regime date has no matching trading day).
+            try:
+                idx = prices_lookup.index.get_indexer([seg["start"]], method="ffill")[0]
+                if idx == -1:
+                    continue
+                px = float(prices_lookup.iloc[idx])
+            except Exception:
+                continue
+            per_regime.setdefault(seg["regime"], {"x": [], "y": [], "hover": []})
+            per_regime[seg["regime"]]["x"].append(seg["start"])
+            per_regime[seg["regime"]]["y"].append(px)
+            per_regime[seg["regime"]]["hover"].append(
+                f"<b>{REGIME_ICONS.get(seg['regime'],'')} {seg['regime']}</b><br>"
+                f"start: {seg['start'].strftime('%Y-%m-%d')}<br>"
+                f"end: {seg['end'].strftime('%Y-%m-%d')}<br>"
+                f"duration: {seg['days']}j ({seg['bars']} bars)"
+            )
+
+        for regime, data in per_regime.items():
+            fig.add_trace(go.Scatter(
+                x=data["x"],
+                y=data["y"],
+                mode="markers",
+                name=regime,
+                marker=dict(
+                    symbol=REGIME_SYMBOL.get(regime, "circle"),
+                    color=REGIME_COLOURS.get(regime, "#94a3b8"),
+                    size=14,
+                    line=dict(color="#0f172a", width=1.0),
+                ),
+                hovertemplate="%{customdata}<extra></extra>",
+                customdata=data["hover"],
+                showlegend=True,
+            ))
     else:
         # No price line → regime bands still rendered, with a placeholder note.
         fig.add_annotation(
@@ -271,14 +329,20 @@ else:
         )
 
     fig.update_layout(
-        height=440,
+        height=480,
         margin=dict(l=10, r=10, t=10, b=10),
         plot_bgcolor="#ffffff",
         paper_bgcolor="#ffffff",
-        showlegend=False,
+        showlegend=True,
+        legend=dict(
+            orientation="h", yanchor="bottom", y=1.02,
+            xanchor="right",  x=1,
+            bgcolor="rgba(255,255,255,0.6)",
+            bordercolor="#e5e7eb", borderwidth=1,
+        ),
         xaxis=dict(showgrid=True, gridcolor="#f1f5f9"),
         yaxis=dict(showgrid=True, gridcolor="#f1f5f9", title=None),
-        hovermode="x unified",
+        hovermode="closest",
     )
     st.plotly_chart(fig, use_container_width=True, theme=None)
 
