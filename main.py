@@ -525,6 +525,7 @@ def _build_run_context(
     return {
         "asset_group":         asset_group or "—",
         "config_set":          config_set or "base",
+        "regime_proxy":        hmm_cfg.get("regime_proxy", ""),
         "symbols":             list(symbols),
         "symbol_descriptions": sym_descs,
         "start_date":          start_date,

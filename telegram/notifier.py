@@ -121,15 +121,16 @@ def _build_message(event: str, data: Dict[str, Any]) -> str:
         to_r    = data.get("to_regime",   "?")
         group   = data.get("asset_group", "—")
         equity  = data.get("equity")
-        from telegram.formatter import _now, _header, _active_set_name, _set_str
+        from telegram.formatter import _now, _header, _active_set_name, _set_str, _active_proxy, _proxy_str
         cfg_set = data.get("config_set") or _active_set_name()
+        proxy   = data.get("regime_proxy") or _active_proxy()
         icons = {"BULL": "🟢", "EUPHORIA": "🚀", "BEAR": "🔴",
                  "CRASH": "💥", "NEUTRAL": "⚪"}
         icon   = icons.get(to_r.upper(), "📊")
         eq_str = f"  ${equity:,.0f}" if equity else ""
         return (
             f"{_header()}\n"
-            f"{icon} <b>Régime: {from_r} → {to_r}</b>  {group}{_set_str(cfg_set)}{eq_str}  ·  <i>{_now()}</i>"
+            f"{icon} <b>Régime: {from_r} → {to_r}</b>  {group}{_set_str(cfg_set)}{_proxy_str(proxy)}{eq_str}  ·  <i>{_now()}</i>"
         )
 
     if event == "trade":
@@ -139,14 +140,15 @@ def _build_message(event: str, data: Dict[str, Any]) -> str:
         equity  = data.get("equity")
         group   = data.get("asset_group", "—")
         regime  = data.get("regime",      "?")
-        from telegram.formatter import _now, _pct, _header, _active_set_name, _set_str
+        from telegram.formatter import _now, _pct, _header, _active_set_name, _set_str, _active_proxy, _proxy_str
         cfg_set = data.get("config_set") or _active_set_name()
+        proxy   = data.get("regime_proxy") or _active_proxy()
         icon    = "🟢" if (pnl_pct or 0) >= 0 else "🔴"
         pnl_str = f"  {_pct(pnl_pct)}" if pnl_pct is not None else ""
         eq_str  = f"  ${equity:,.0f}" if equity else ""
         return (
             f"{_header()}\n"
-            f"{icon} <b>TRADE {symbol} {side.upper()}</b>{pnl_str}  {group}/{regime}{_set_str(cfg_set)}{eq_str}  ·  <i>{_now()}</i>"
+            f"{icon} <b>TRADE {symbol} {side.upper()}</b>{pnl_str}  {group}/{regime}{_set_str(cfg_set)}{_proxy_str(proxy)}{eq_str}  ·  <i>{_now()}</i>"
         )
 
     logger.warning("Unknown telegram event: '%s'", event)

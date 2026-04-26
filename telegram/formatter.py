@@ -71,6 +71,24 @@ def _set_str(cfg_set: str) -> str:
     return f"  [{cfg_set}]" if cfg_set else ""
 
 
+def _proxy_str(proxy: str) -> str:
+    """Format the HMM regime-proxy symbol as a compact title-line suffix."""
+    return f"  · HMM: <code>{proxy}</code>" if proxy else ""
+
+
+def _active_proxy() -> str:
+    """Best-effort read of hmm.regime_proxy from current config (settings.yaml +
+    active set). Used for live messages where no run_context is available."""
+    try:
+        import sys as _sys
+        _sys.path.insert(0, str(ROOT))
+        from main import load_config
+        cfg = load_config()
+        return cfg.get("hmm", {}).get("regime_proxy", "")
+    except Exception:
+        return ""
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).strftime("%d %b %Y %H:%M UTC")
 
@@ -90,7 +108,7 @@ def _latest_backtest_dir() -> Optional[Path]:
 def format_test() -> str:
     return (
         f"{_header()}\n"
-        f"✅ <b>Regime Trader — connexion OK</b>  active set: <code>{_active_set_name()}</code>  ·  <i>{_now()}</i>"
+        f"✅ <b>Regime Trader — connexion OK</b>  active set: <code>{_active_set_name()}</code>{_proxy_str(_active_proxy())}  ·  <i>{_now()}</i>"
     )
 
 
@@ -109,13 +127,14 @@ def format_backtest_summary() -> str:
 
     group   = "—"
     symbols = str(s.get("symbols", "—"))
-    cfg_set = ""
+    cfg_set, proxy = "", ""
     if ctx_path.exists():
         try:
             c = json.loads(ctx_path.read_text())
             group   = c.get("asset_group", "—")
             symbols = ", ".join(c.get("symbols", []))
             cfg_set = c.get("config_set", "")
+            proxy   = c.get("regime_proxy", "")
         except Exception:
             pass
 
@@ -132,7 +151,7 @@ def format_backtest_summary() -> str:
 
     return (
         f"{_header()}\n"
-        f"📊 <b>Backtest — {group}</b>{_set_str(cfg_set)}\n"
+        f"📊 <b>Backtest — {group}</b>{_set_str(cfg_set)}{_proxy_str(proxy)}\n"
         f"<code>{symbols}</code>  ·  {start}→{end} ({folds} folds)\n"
         f"<b>{_pct(ret)}</b>  CAGR {_pct(cagr)}  ·  Sharpe <b>{sharpe:.2f}</b>  Calmar {calmar:.2f}  MaxDD {_pct(dd)}\n"
         f"{trades} trades  ·  {winr * 100:.1f}% win  ·  <i>{_now()}</i>"
@@ -158,16 +177,17 @@ def format_latest_trades(n: int = 5) -> str:
     date_col = next((c for c in ["exit_date", "date", "entry_date"] if c in df.columns), None)
 
     ctx_path = d / "run_context.json"
-    group, cfg_set = "—", ""
+    group, cfg_set, proxy = "—", "", ""
     if ctx_path.exists():
         try:
             c = json.loads(ctx_path.read_text())
             group   = c.get("asset_group", "—")
             cfg_set = c.get("config_set", "")
+            proxy   = c.get("regime_proxy", "")
         except Exception:
             pass
 
-    lines = [_header(), f"📈 <b>Derniers trades — {group}</b>{_set_str(cfg_set)}"]
+    lines = [_header(), f"📈 <b>Derniers trades — {group}</b>{_set_str(cfg_set)}{_proxy_str(proxy)}"]
     for _, row in df.tail(n).iterrows():
         sym  = str(row[sym_col])  if sym_col  else "?"
         date = str(row[date_col])[:10] if date_col else "?"
@@ -199,16 +219,17 @@ def format_stress_summary() -> str:
     df = pd.read_csv(stress, index_col=0)
 
     ctx_path = stress.parent / "run_context.json"
-    group, cfg_set = "—", ""
+    group, cfg_set, proxy = "—", "", ""
     if ctx_path.exists():
         try:
             c = json.loads(ctx_path.read_text())
             group   = c.get("asset_group", "—")
             cfg_set = c.get("config_set", "")
+            proxy   = c.get("regime_proxy", "")
         except Exception:
             pass
 
-    lines = [_header(), f"⚡ <b>Stress Test — {group}</b>{_set_str(cfg_set)}"]
+    lines = [_header(), f"⚡ <b>Stress Test — {group}</b>{_set_str(cfg_set)}{_proxy_str(proxy)}"]
     for scenario, row in df.iterrows():
         sharpe = row.get("sharpe", "?")
         dd     = row.get("max_drawdown", "?")
@@ -279,19 +300,20 @@ def format_regime_status() -> str:
     body = "\n".join(rows)
 
     ctx_path = d / "run_context.json"
-    asset_grp, cfg_set = "—", ""
+    asset_grp, cfg_set, proxy = "—", "", ""
     if ctx_path.exists():
         try:
             c = json.loads(ctx_path.read_text())
             asset_grp = c.get("asset_group", "—")
             cfg_set   = c.get("config_set", "")
+            proxy     = c.get("regime_proxy", "")
         except Exception:
             pass
 
     src = d.name.replace("backtest_", "")
     return (
         f"{_header()}\n"
-        f"{cur_icon} <b>Régime: {cur['regime']}</b>  on <code>{asset_grp}</code>{_set_str(cfg_set)}  depuis {cur['start'].strftime('%Y-%m-%d')}  ({cur_days}j)\n"
+        f"{cur_icon} <b>Régime: {cur['regime']}</b>  on <code>{asset_grp}</code>{_set_str(cfg_set)}{_proxy_str(proxy)}  depuis {cur['start'].strftime('%Y-%m-%d')}  ({cur_days}j)\n"
         f"<i>Bars: {bar_freq}  ·  source: backtest {src}  ·  10 derniers segments :</i>\n"
         f"<pre>{body}</pre>\n"
         f"<i>{_now()}</i>"
