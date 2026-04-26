@@ -13,7 +13,11 @@ import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
 
-from dashstreamlite.data_loader import (
+# Streamlit runs app.py as a top-level script (not as part of a package),
+# so `dashstreamlite/` is already on sys.path[0]. Import the sibling module
+# directly to keep this working whether you launch from the repo root or
+# from inside dashstreamlite/.
+from data_loader import (
     BotContext,
     fetch_proxy_prices,
     latest_backtest_dir,
