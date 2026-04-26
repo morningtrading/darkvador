@@ -473,7 +473,14 @@ class AlpacaClient:
             )
 
     def _health_check(self) -> None:
-        """Verify the connection by fetching account info."""
+        """Verify the connection by fetching account info.
+
+        We tolerate Alpaca returning an account `status` that the pinned SDK
+        doesn't yet know about (e.g. ACCOUNT_CLOSED_PENDING during a paper
+        reset, or any new enum Alpaca rolls out). The Pydantic ValidationError
+        bubbles up as a fatal RuntimeError otherwise; here we fall back to a
+        raw HTTP probe to read just the fields we actually need.
+        """
         try:
             acct = self._trading_client.get_account()
             logger.info(
@@ -484,7 +491,43 @@ class AlpacaClient:
                 float(acct.buying_power),
                 acct.status,
             )
+            return
         except Exception as exc:
+            msg = str(exc)
+            # Pydantic enum mismatch on `status` → the account exists, but the
+            # SDK can't parse one new enum value. Probe the REST API directly
+            # to confirm credentials work and surface the real status.
+            if "status" in msg and "Input should be" in msg:
+                try:
+                    import requests
+                    base = "https://paper-api.alpaca.markets" if self.paper \
+                        else "https://api.alpaca.markets"
+                    r = requests.get(
+                        f"{base}/v2/account",
+                        headers={
+                            "APCA-API-KEY-ID":     self._api_key,
+                            "APCA-API-SECRET-KEY": self._secret_key,
+                        },
+                        timeout=5,
+                    )
+                    r.raise_for_status()
+                    d = r.json()
+                    raw_status = d.get("status", "?")
+                    if raw_status in ("ACCOUNT_CLOSED_PENDING",):
+                        raise RuntimeError(
+                            f"Alpaca account is in transitory state "
+                            f"'{raw_status}' (paper reset in progress?). "
+                            "Wait a few minutes and retry."
+                        ) from exc
+                    logger.warning(
+                        "Health check: SDK rejected unknown status '%s' but "
+                        "REST probe succeeded (equity=$%s, cash=$%s). "
+                        "Continuing — consider upgrading alpaca-py.",
+                        raw_status, d.get("equity"), d.get("cash"),
+                    )
+                    return
+                except Exception:
+                    pass  # fall through to the original RuntimeError below
             raise RuntimeError(f"Alpaca health check failed: {exc}") from exc
 
     @staticmethod
