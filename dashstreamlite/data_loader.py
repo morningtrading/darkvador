@@ -210,30 +210,31 @@ def compute_full_period_regimes(
     start: str,
     end: str,
     hmm_params_repr: tuple,
-) -> Optional[pd.DataFrame]:
+) -> tuple[Optional[pd.DataFrame], Optional[str]]:
     """Train ONE HMM on the full [start, end] window for `symbol` and return
-    a DataFrame[date, regime] with one label per bar.
+    a tuple (DataFrame[date, regime], None) on success, or (None, error_str)
+    on failure. The error string is surfaced to the dashboard so the user can
+    see what actually went wrong instead of a generic "training failed"
+    message.
 
     Differences from the bot's walk-forward backtest:
       - single fold, single label mapping over the entire timeline
       - features computed from `symbol` alone (no cross-symbol blending)
       - uses yfinance OHLCV (so the dashboard has no Alpaca dep)
-
-    `hmm_params_repr` must be a hashable tuple-of-tuples representation of
-    the relevant HMM config so streamlit caching can key on it.
     """
     try:
         from core.hmm_engine import HMMEngine
         from data.feature_engineering import FeatureEngineer
-    except Exception:
-        return None
+    except Exception as e:
+        return None, f"import error: {e}"
 
     bars = fetch_proxy_ohlcv(symbol, start, end)
     if bars is None or bars.empty:
-        return None
+        return None, f"yfinance returned no bars for {symbol} on [{start}, {end}]"
     needed = {"close", "high", "low"}
-    if not needed.issubset(bars.columns):
-        return None
+    missing = needed - set(bars.columns)
+    if missing:
+        return None, f"OHLCV missing columns {sorted(missing)} (got {sorted(bars.columns)})"
 
     params = dict(hmm_params_repr)
 
@@ -243,13 +244,14 @@ def compute_full_period_regimes(
             bars,
             feature_names=list(params.get("feature_names", ["log_ret_1", "realized_vol_20"])),
         )
-    except Exception:
-        return None
+    except Exception as e:
+        return None, f"feature build failed: {type(e).__name__}: {e}"
     features_clean = features.dropna()
 
     min_train = int(params.get("min_train_bars", 252))
     if len(features_clean) < min_train:
-        return None
+        return None, (f"only {len(features_clean)} clean feature rows "
+                      f"(need {min_train}) — try a longer history window")
 
     engine = HMMEngine(
         n_candidates    = list(params.get("n_candidates", [5])),
@@ -263,16 +265,19 @@ def compute_full_period_regimes(
     )
     try:
         engine.fit(features_clean.values)
-    except Exception:
-        return None
+    except Exception as e:
+        return None, f"HMM fit failed: {type(e).__name__}: {e}"
 
     states = engine.predict_regime_filtered(features_clean.values)
     if not states:
-        return None
+        return None, "HMM produced zero states"
 
-    return pd.DataFrame(
-        {"regime": [s.label for s in states]},
-        index=features_clean.index[: len(states)],
+    return (
+        pd.DataFrame(
+            {"regime": [s.label for s in states]},
+            index=features_clean.index[: len(states)],
+        ),
+        None,
     )
 
 

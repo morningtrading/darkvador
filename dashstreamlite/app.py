@@ -414,17 +414,28 @@ else:
 
     @st.cache_data(show_spinner="Training single-fold HMM on full period (~90s on first run)...")
     def _cached_full_period_regimes(symbol, start, end, params_repr):
-        return compute_full_period_regimes(symbol, start, end, params_repr)
+        df, err = compute_full_period_regimes(symbol, start, end, params_repr)
+        # Cache only successes — caching None would persist transient yfinance
+        # failures across reruns. Raising on failure makes Streamlit skip the
+        # cache write and re-attempt next time.
+        if df is None:
+            raise RuntimeError(err or "unknown error")
+        return df
 
-    sf_df = _cached_full_period_regimes(
-        ctx.regime_proxy, start_str, end_str, hmm_params_repr,
-    )
+    sf_df = None
+    sf_err = None
+    try:
+        sf_df = _cached_full_period_regimes(
+            ctx.regime_proxy, start_str, end_str, hmm_params_repr,
+        )
+    except Exception as exc:
+        sf_err = str(exc)
 
     if sf_df is None or sf_df.empty:
         st.error(
-            "Single-fold HMM training failed. yfinance may have returned "
-            "incomplete data, or the feature pipeline could not produce "
-            "enough clean rows. Try a longer history window."
+            f"Single-fold HMM training failed: **{sf_err or 'no data'}**. "
+            "Click *Refresh now* in the sidebar to retry — transient "
+            "yfinance failures often clear on a second attempt."
         )
     else:
         sf_segments = regime_segments(sf_df)
