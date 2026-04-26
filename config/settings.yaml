@@ -7,13 +7,19 @@
 broker:
   paper_trading: true
   asset_group: stocks    # symbols resolved from config/asset_groups.yaml
-  timeframe: 1Day        # bar size for both backtest and live; HMM trains
-                         #  on this directly. Supported: 1Day, 1Hour, 5Min,
-                         #  1Min. Daily is the canonical / tested choice.
+  timeframe: 1Day        # main-loop cadence: how often the bot wakes up to
+                         #  evaluate signals, check risk, post fills. For live
+                         #  trading consider 5Min so the risk manager runs
+                         #  intraday. Supported: 1Day, 1Hour, 5Min, 1Min.
   base_url_paper: https://paper-api.alpaca.markets
   base_url_live: https://api.alpaca.markets
   data_feed: iex
 hmm:
+  timeframe: 1Day        # bar size on which the HMM is trained and predicts
+                         #  regimes. Independent from broker.timeframe so the
+                         #  main loop can tick intraday while regimes stay
+                         #  macro (the original design intent — regimes are
+                         #  not meant to flicker on 5-min noise).
   n_candidates:
   - 5
   n_init: 10

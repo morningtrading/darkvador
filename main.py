@@ -1224,14 +1224,12 @@ class TradingSession:
 
         # ── 3. Load or train HMM ──────────────────────────────────────────────
         _print("\n[3/7] Loading HMM model ...", console)
-        # Inject broker.timeframe into hmm_cfg so the HMM trains on the same
-        # bar size used everywhere else (default 1Day). Without this, _train_hmm
-        # silently fell back to 5Min and produced a different feature
-        # distribution than the backtest, with regime labels (e.g. CRASH) that
-        # weren't comparable to the 1Day baseline.
-        hmm_cfg_eff = {**hmm_cfg, "timeframe": timeframe}
+        # broker.timeframe drives the main-loop cadence; hmm.timeframe drives
+        # what bars the HMM is trained on. They are independent so the bot can
+        # wake up every 5 min for risk checks while the regime model still
+        # operates on daily bars (original design intent).
         self.hmm_engine = _load_or_train_hmm(
-            self.client, symbols, hmm_cfg_eff, console=console
+            self.client, symbols, hmm_cfg, console=console
         )
 
         # Build StrategyOrchestrator from fitted regime infos
@@ -2140,7 +2138,6 @@ class TradingSession:
                 _print("Weekly HMM retrain ...", self.console, style="dim")
                 try:
                     hmm_cfg = self.config.get("hmm", {})
-                    hmm_cfg = {**hmm_cfg, "timeframe": timeframe}  # match broker
                     self.hmm_engine = _train_hmm(
                         self.client, symbols, hmm_cfg, console=self.console
                     )
