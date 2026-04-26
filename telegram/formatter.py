@@ -211,18 +211,60 @@ def format_regime_status() -> str:
         return "❌ regime_history.csv introuvable."
 
     import pandas as pd
-    df = pd.read_csv(rh, index_col=0)
+    df = pd.read_csv(rh, index_col=0, parse_dates=True)
     if df.empty:
         return "ℹ️ Historique de régime vide."
 
-    last_date   = str(df.index[-1])[:10]
-    last_regime = str(df.iloc[-1, 0])
-    icons = {"BULL": "🟢", "EUPHORIA": "🚀", "BEAR": "🔴", "CRASH": "💥", "NEUTRAL": "⚪"}
-    icon  = icons.get(last_regime.upper(), "📊")
-    recent = " ".join(r[:3] for r in df.iloc[-8:, 0].tolist())
+    regime_col = df.iloc[:, 0].astype(str)
 
+    # Detect bar frequency from the median spacing between bars (handles
+    # daily, hourly, 5min — independent of whatever settings.yaml claims).
+    if len(df) >= 2:
+        med = pd.Series(df.index).diff().dropna().median()
+        if med <= pd.Timedelta(minutes=10):
+            bar_freq = "5min"
+        elif med <= pd.Timedelta(hours=2):
+            bar_freq = "1h"
+        else:
+            bar_freq = "daily"
+    else:
+        bar_freq = "?"
+
+    # Run-length encode regime_col into contiguous segments.
+    changes = regime_col != regime_col.shift()
+    seg_id = changes.cumsum()
+    segments = []
+    for _, group in regime_col.groupby(seg_id):
+        segments.append({
+            "regime": group.iloc[0],
+            "start":  group.index[0],
+            "end":    group.index[-1],
+            "bars":   len(group),
+        })
+
+    icons = {"BULL": "🟢", "EUPHORIA": "🚀", "BEAR": "🔴", "CRASH": "💥", "NEUTRAL": "⚪"}
+    cur = segments[-1]
+    cur_icon = icons.get(cur["regime"].upper(), "📊")
+    cur_days = (cur["end"] - cur["start"]).days
+
+    last10 = list(reversed(segments[-10:]))
+    rows = []
+    for s in last10:
+        ic    = icons.get(s["regime"].upper(), "📊")
+        days  = (s["end"] - s["start"]).days
+        start = s["start"].strftime("%Y-%m-%d")
+        if s is segments[-1]:
+            rows.append(f"{ic} {s['regime']:<8} {start} → en cours  ({days:>3}j)")
+        else:
+            end = s["end"].strftime("%Y-%m-%d")
+            rows.append(f"{ic} {s['regime']:<8} {start} → {end}  ({days:>3}j)")
+    body = "\n".join(rows)
+
+    src = d.name.replace("backtest_", "")
     return (
         f"{_header()}\n"
-        f"{icon} <b>Régime: {last_regime}</b>  {last_date}\n"
-        f"Récent: <code>{recent}</code>  ·  <i>{_now()}</i>"
+        f"{cur_icon} <b>Régime: {cur['regime']}</b>  depuis {cur['start'].strftime('%Y-%m-%d')}  ({cur_days}j)\n"
+        f"<i>Bars: {bar_freq}  ·  source: backtest {src}  ·  10 derniers segments :</i>\n"
+        f"<pre>{body}</pre>\n"
+        f"<i>{_now()}</i>"
     )
