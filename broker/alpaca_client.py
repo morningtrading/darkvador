@@ -115,19 +115,36 @@ class AlpacaClient:
         _env_path = Path(__file__).resolve().parent.parent / ".env"
         load_dotenv(dotenv_path=_env_path, override=False)
 
-        self._api_key:    str = (
-            _alpaca_creds.get("api_key") or os.environ.get("ALPACA_API_KEY", "")
-        )
-        self._secret_key: str = (
-            _alpaca_creds.get("secret_key") or os.environ.get("ALPACA_SECRET_KEY", "")
-        )
-
+        # Determine paper vs live first — that decides which key block applies.
         if paper is None:
             if "paper" in _alpaca_creds:
                 paper = bool(_alpaca_creds["paper"])
             else:
                 env_val = os.environ.get("ALPACA_PAPER", "true").lower()
                 paper = env_val not in ("false", "0", "no")
+
+        # Mode-specific key blocks: alpaca.paper_keys / alpaca.live_keys.
+        # Falls back to flat alpaca.api_key / alpaca.secret_key for the legacy
+        # single-account credentials format. Env vars are last-resort.
+        _key_block_name = "paper_keys" if paper else "live_keys"
+        _mode_keys      = _alpaca_creds.get(_key_block_name, {}) or {}
+
+        self._api_key:    str = (
+            _mode_keys.get("api_key")
+            or _alpaca_creds.get("api_key")
+            or os.environ.get(
+                "ALPACA_PAPER_API_KEY" if paper else "ALPACA_LIVE_API_KEY", ""
+            )
+            or os.environ.get("ALPACA_API_KEY", "")
+        )
+        self._secret_key: str = (
+            _mode_keys.get("secret_key")
+            or _alpaca_creds.get("secret_key")
+            or os.environ.get(
+                "ALPACA_PAPER_SECRET_KEY" if paper else "ALPACA_LIVE_SECRET_KEY", ""
+            )
+            or os.environ.get("ALPACA_SECRET_KEY", "")
+        )
 
         self.paper:     bool = paper
         self.data_feed: str  = (

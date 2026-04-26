@@ -7,7 +7,9 @@
 broker:
   paper_trading: true
   asset_group: stocks    # symbols resolved from config/asset_groups.yaml
-  timeframe: 5Min
+  timeframe: 1Day        # bar size for both backtest and live; HMM trains
+                         #  on this directly. Supported: 1Day, 1Hour, 5Min,
+                         #  1Min. Daily is the canonical / tested choice.
   base_url_paper: https://paper-api.alpaca.markets
   base_url_live: https://api.alpaca.markets
   data_feed: iex

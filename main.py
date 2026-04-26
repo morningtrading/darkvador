@@ -441,7 +441,7 @@ def _print_run_config(
         f"{'─' * 62}",
         f"  Assets      : {', '.join(symbols)}",
         f"  Period      : {start_date}  →  {end_date}",
-        f"  Frequency   : 1Day bars (backtest — live broker uses {broker_cfg.get('timeframe', '5Min')})",
+        f"  Frequency   : {broker_cfg.get('timeframe', '1Day')} bars (shared between backtest and live)",
         f"  Capital     : ${float(bt_cfg.get('initial_capital', 100_000)):,.0f}   "
         f"Slippage: {float(bt_cfg.get('slippage_pct', 0.0005)) * 10_000:.1f} bps",
         f"  Walk-fwd    : IS {bt_cfg.get('train_window', 252)} / "
@@ -768,12 +768,20 @@ def _hmm_needs_retrain(model_path: Path, max_age_days: int) -> bool:
     return age.days >= max_age_days
 
 
+_N_BARS_BY_TF = {     # default training-history sizes per timeframe
+    "1Day":  1_500,   # ~6 years of trading days
+    "1Hour": 5_000,   # ~3 years (6.5 hrs/day × 252 days/yr)
+    "5Min":  5_000,   # ~3 months
+    "1Min":  5_000,   # ~3 weeks
+}
+
+
 def _train_hmm(
     client,
     symbols: List[str],
     hmm_cfg: Dict,
     console=None,
-    n_bars: int = 5_000,  # ~3 months of 5-min bars (78 bars/day × 65 days)
+    n_bars: Optional[int] = None,
     progress_cb=None,
 ) -> "HMMEngine":
     """Fetch data, compute features, fit HMM, save to disk. Returns fitted engine.
@@ -791,7 +799,9 @@ def _train_hmm(
     from core.hmm_engine import HMMEngine
     from data.feature_engineering import FeatureEngineer
 
-    tf = hmm_cfg.get("timeframe", "5Min")
+    tf = hmm_cfg.get("timeframe", "1Day")
+    if n_bars is None:
+        n_bars = _N_BARS_BY_TF.get(tf, 5_000)
 
     # ── Progress helper ────────────────────────────────────────────────────
     # Emits a stage label through three channels:
@@ -1212,8 +1222,14 @@ class TradingSession:
 
         # ── 3. Load or train HMM ──────────────────────────────────────────────
         _print("\n[3/7] Loading HMM model ...", console)
+        # Inject broker.timeframe into hmm_cfg so the HMM trains on the same
+        # bar size used everywhere else (default 1Day). Without this, _train_hmm
+        # silently fell back to 5Min and produced a different feature
+        # distribution than the backtest, with regime labels (e.g. CRASH) that
+        # weren't comparable to the 1Day baseline.
+        hmm_cfg_eff = {**hmm_cfg, "timeframe": timeframe}
         self.hmm_engine = _load_or_train_hmm(
-            self.client, symbols, hmm_cfg, console=console
+            self.client, symbols, hmm_cfg_eff, console=console
         )
 
         # Build StrategyOrchestrator from fitted regime infos
@@ -1434,7 +1450,7 @@ class TradingSession:
         try:
             _proxy_live = hmm_cfg.get("regime_proxy") or None
             _ref_sym   = (_proxy_live if _proxy_live and _proxy_live in symbols else None) or symbols[0]
-            _tf        = broker_cfg.get("timeframe", "5Min")
+            _tf        = broker_cfg.get("timeframe", "1Day")
             _pred_bars = _fetch_live_bars(self.client, symbols, _tf, n_bars=300)
             _ref_df    = _pred_bars.get(_ref_sym)
             if _ref_df is None:
@@ -1506,7 +1522,7 @@ class TradingSession:
             trading_allowed = True,
             notes           = _startup_notes,
         )
-        _startup_tf = broker_cfg.get("timeframe", "5Min")
+        _startup_tf = broker_cfg.get("timeframe", "1Day")
         self.dashboard.update(
             snapshot       = port_snapshot,
             signal         = _startup_signal,
@@ -2120,6 +2136,7 @@ class TradingSession:
                 _print("Weekly HMM retrain ...", self.console, style="dim")
                 try:
                     hmm_cfg = self.config.get("hmm", {})
+                    hmm_cfg = {**hmm_cfg, "timeframe": timeframe}  # match broker
                     self.hmm_engine = _train_hmm(
                         self.client, symbols, hmm_cfg, console=self.console
                     )
