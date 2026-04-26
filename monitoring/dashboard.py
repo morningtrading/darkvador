@@ -208,6 +208,25 @@ class Dashboard:
         self._next_hmm_dt:    Optional[dt.datetime] = None
         self._timeframe:      str                   = ""
 
+        # ── Identity / config context (parity with Telegram messages) ─────────
+        self._config_set:  str = ""
+        self._regime_proxy: str = ""
+        # Compute static machine context once (host, IP, OS, git SHA).
+        self._meta_header: str = self._compute_meta_header()
+
+    @staticmethod
+    def _compute_meta_header() -> str:
+        """Bot · host · ip · os · #sha — same content as the Telegram header,
+        delegated to telegram.formatter so the format stays in sync."""
+        try:
+            from telegram.formatter import (
+                BOT_NAME, _HOST, _IP, _OS, _SHA,  # all module-load cached
+            )
+            return f"{BOT_NAME} · {_HOST} · {_IP} · {_OS} · #{_SHA}"
+        except Exception:
+            import socket as _s
+            return _s.gethostname()
+
     # ======================================================================= #
     # Lifecycle                                                                #
     # ======================================================================= #
@@ -256,6 +275,8 @@ class Dashboard:
         asset_group:     Optional[str]               = None,
         symbols:         Optional[List[str]]         = None,
         alloc_info:      Optional[dict]              = None,
+        config_set:      Optional[str]               = None,
+        regime_proxy:    Optional[str]               = None,
     ) -> None:
         """
         Push new data to the dashboard from any thread.
@@ -293,6 +314,8 @@ class Dashboard:
             if asset_group    is not None: self._asset_group    = asset_group
             if symbols        is not None: self._symbols        = symbols
             if alloc_info     is not None: self._alloc_info     = alloc_info
+            if config_set     is not None: self._config_set     = config_set
+            if regime_proxy   is not None: self._regime_proxy   = regime_proxy
             if event is not None:
                 ts = dt.datetime.now().strftime("%H:%M:%S")
                 self._recent_events.appendleft(f"[dim]{ts}[/dim]  {event}")
@@ -378,6 +401,10 @@ class Dashboard:
         parts.append(("|  Market: ", "dim"))
         parts.append(Text.from_markup(market))
         text = Text.assemble(*parts)
+        # Second line: identity / config context (Telegram parity).
+        if self._meta_header:
+            text.append("\n  ")
+            text.append_text(Text(self._meta_header, style="dim"))
         return Panel(text, style="bold", padding=(0, 1))
 
     # ── Regime ────────────────────────────────────────────────────────────────
@@ -431,7 +458,12 @@ class Dashboard:
         if self._symbols:
             parts_line = ["  "]
             if self._asset_group:
-                parts_line.append(f"[bold]{self._asset_group}[/bold]  [dim]│[/dim]  ")
+                parts_line.append(f"[bold]{self._asset_group}[/bold]")
+                if self._config_set:
+                    parts_line.append(f"  [yellow][{self._config_set}][/yellow]")
+                if self._regime_proxy:
+                    parts_line.append(f"  [dim]· HMM:[/dim] [cyan]{self._regime_proxy}[/cyan]")
+                parts_line.append("  [dim]│[/dim]  ")
             parts_line.append("[dim]" + "  │  ".join(self._symbols) + "[/dim]")
             body.append("\n")
             body.append_text(Text.from_markup("".join(parts_line)))

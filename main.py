@@ -1121,11 +1121,13 @@ class TradingSession:
         multi_strat_filter: Optional[List[str]] = None,
         asset_group: Optional[str] = None,
         symbols_arg: Optional[str] = None,
+        config_set:  Optional[str] = None,
     ) -> None:
         self.config       = config
         self.dry_run      = dry_run
         self.asset_group  = asset_group
         self.symbols_arg  = symbols_arg
+        self.config_set   = config_set or _resolve_config_set(None)
         self.console      = _console()
 
         # Component references (set during startup)
@@ -1535,6 +1537,8 @@ class TradingSession:
             timeframe      = _startup_tf,
             asset_group    = broker_cfg.get("asset_group", ""),
             symbols        = symbols,
+            config_set     = self.config_set,
+            regime_proxy   = hmm_cfg.get("regime_proxy", ""),
         )
 
         # Register fill callback for logging
@@ -2898,6 +2902,7 @@ def run_trading(
     multi_strat_filter: Optional[List[str]] = None,
     asset_group: Optional[str] = None,
     symbols_arg: Optional[str] = None,
+    config_set:  Optional[str] = None,
 ) -> None:
     """
     Full live / paper trading loop.
@@ -2913,6 +2918,7 @@ def run_trading(
         multi_strat_filter=multi_strat_filter,
         asset_group=asset_group,
         symbols_arg=symbols_arg,
+        config_set=config_set,
     )
 
     # Register shutdown signal handlers
@@ -4067,6 +4073,7 @@ def main() -> None:
             multi_strat_filter  = _strat_filter,
             asset_group         = getattr(args, "asset_group", None),
             symbols_arg         = getattr(args, "symbols", None),
+            config_set          = getattr(args, "config_set", None),
         )
 
     elif args.command == "backtest":
