@@ -1193,10 +1193,11 @@ class TradingSession:
             console,
         )
 
-        # ── 1. Connect to Alpaca ──────────────────────────────────────────────
-        _print("\n[1/7] Connecting to Alpaca ...", console)
-        from broker.alpaca_client import AlpacaClient
-        self.client = AlpacaClient(paper=paper)
+        # ── 1. Connect to broker (resolved via factory) ──────────────────────
+        _provider = broker_cfg.get("provider", "alpaca")
+        _print(f"\n[1/7] Connecting to broker ({_provider}) ...", console)
+        from broker import get_broker
+        self.client = get_broker(_provider, paper=paper)
         self.client.connect_with_retry(max_attempts=3, base_delay=2.0)
 
         account = self.client.get_account()
@@ -2996,8 +2997,8 @@ def run_train_only(config: Dict, args: Optional[argparse.Namespace] = None) -> N
 
     _print("[bold cyan]Regime Trader - Train Only[/bold cyan]", console)
 
-    from broker.alpaca_client import AlpacaClient
-    client = AlpacaClient(paper=paper)
+    from broker import get_broker
+    client = get_broker(broker_cfg.get("provider", "alpaca"), paper=paper)
     client.connect_with_retry(max_attempts=3, base_delay=2.0)
 
     # Train on daily bars regardless of live trading timeframe — regimes are

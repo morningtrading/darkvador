@@ -5,6 +5,10 @@
 # made from Linux runs only.
 # ──────────────────────────────────────────────────────────────────────────────
 broker:
+  provider: alpaca       # broker adapter name. Resolved by broker.get_broker().
+                         #  Supported today: alpaca. Future: mt5, ibkr, tradier,
+                         #  tradestation, binance, coinbase, ... (each is a
+                         #  BaseBroker subclass added to broker/).
   paper_trading: true
   asset_group: stocks    # symbols resolved from config/asset_groups.yaml
   timeframe: 5Min        # main-loop cadence: how often the bot wakes up to

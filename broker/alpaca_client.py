@@ -79,7 +79,10 @@ def parse_timeframe(tf_str: str) -> TimeFrame:
 # AlpacaClient                                                                 #
 # --------------------------------------------------------------------------- #
 
-class AlpacaClient:
+from broker.base import BaseBroker
+
+
+class AlpacaClient(BaseBroker):
     """
     Authenticated Alpaca client for market data and account management.
 
