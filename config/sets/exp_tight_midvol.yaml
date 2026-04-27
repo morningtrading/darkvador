@@ -1,0 +1,23 @@
+# exp_tight_midvol.yaml — minimal override over balanced.
+# Test: tighten mid_vol_no_trend allocation (0.70 → 0.50) — the bot stops
+# riding the rally as enthusiastically when the proxy drops below the 50-EMA.
+# Hypothesis: cuts losses faster on regime breaks, at the cost of missed
+# upside during rapid recoveries.
+
+hmm:
+  # Mirror balanced params so the only delta is the strategy allocation.
+  min_confidence: 0.62
+  stability_bars: 7
+  flicker_threshold: 4
+  n_candidates: [5]
+
+strategy:
+  # The actual lever:
+  mid_vol_allocation_no_trend: 0.50
+  # Mirror balanced's other strategy overrides:
+  high_vol_allocation:         0.60
+  rebalance_threshold:         0.18
+
+backtest:
+  slippage_pct: 0.0005
+  min_rebalance_interval: 5

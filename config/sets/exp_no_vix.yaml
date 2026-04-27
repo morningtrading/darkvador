@@ -1,0 +1,31 @@
+# exp_no_vix.yaml — minimal override over balanced.
+# Test: drop VIX feature (use_vix_features: false → HMM_EXTENDED 5 features
+# instead of HMM_EXTENDED_VIX 6). Hypothesis: VIX z-score adds noise when
+# QQQ rises with subdued vol, mis-classifying calm-rally days as BEAR.
+
+hmm:
+  # Mirror balanced HMM params so the only delta vs balanced is the feature set.
+  min_confidence: 0.62
+  stability_bars: 7
+  flicker_threshold: 4
+  n_candidates: [5]
+  # The actual lever:
+  use_vix_features: false
+  # Defensive: lock the feature list explicitly so behaviour is reproducible
+  # even if HMM_EXTENDED's default contents shift in future feature_engineering
+  # refactors.
+  features_override:
+    - log_ret_1
+    - realized_vol_20
+    - vol_ratio
+    - adx_14
+    - dist_sma200
+
+strategy:
+  mid_vol_allocation_no_trend: 0.70
+  high_vol_allocation:         0.60
+  rebalance_threshold:         0.18
+
+backtest:
+  slippage_pct: 0.0005
+  min_rebalance_interval: 5

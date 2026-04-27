@@ -1,0 +1,25 @@
+# exp_high_conf.yaml — minimal override over balanced.
+# Test: raise min_confidence so the bot stays NEUTRAL when the HMM is unsure
+# instead of flipping to BEAR. Hypothesis: cuts the "BEAR fantôme" segments
+# we observed during 2023 / 2025 rallies, at the cost of slower bear detection.
+
+hmm:
+  # Inherited from balanced/base except this override:
+  min_confidence: 0.75
+  # All other balanced overrides preserved by the deep_merge if balanced is
+  # the base, OR you backtest with --set exp_high_conf and the loader merges
+  # with settings.yaml directly (then balanced overrides are NOT applied).
+  # Ensure parity with balanced for the comparison:
+  stability_bars: 7
+  flicker_threshold: 4
+  n_candidates: [5]
+
+strategy:
+  # Mirror balanced's strategy block so the only delta vs balanced is min_confidence.
+  mid_vol_allocation_no_trend: 0.70
+  high_vol_allocation:         0.60
+  rebalance_threshold:         0.18
+
+backtest:
+  slippage_pct: 0.0005
+  min_rebalance_interval: 5
