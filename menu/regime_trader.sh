@@ -172,6 +172,9 @@ print_menu() {
     echo -e "  ${GREEN}[p]${RESET}  Interval Sweep   ${DIM}(find best min_rebalance_interval, active group)${RESET}"
     echo -e "  ${GREEN}[r]${RESET}  Conf×Stab Sweep  ${DIM}(2-D grid: min_confidence × stability_bars)${RESET}"
     echo ""
+    echo -e "  ${YELLOW}── Dashboards (Streamlit) ──────────────────${RESET}"
+    echo -e "  ${GREEN}[v]${RESET}  Risk-of-Ruin UI  ${DIM}(Monte-Carlo sim + regime × asset analysis · :8502)${RESET}"
+    echo ""
     echo -e "  ${YELLOW}── Config Sets ─────────────────────────────${RESET}"
     echo -e "  ${MAGENTA}[c]${RESET}  Config Set       ${DIM}(conservative | balanced | aggressive)${RESET}"
     echo ""
@@ -676,6 +679,22 @@ while true; do
             run_command \
                 "Conf×Stab Grid Sweep — group: $ASSET_GROUP  2020-now" \
                 "$PYTHON main.py cs-sweep --asset-group $ASSET_GROUP --start 2020-01-01"
+            ;;
+        v|V)
+            # Streamlit UI on port 8502 — Monte-Carlo Risk-of-Ruin simulator.
+            # mcsimulations/ is intentionally untracked; this just launches it
+            # if present. Ctrl-C stops the server and returns to the menu.
+            if [ ! -f "$ROOT/mcsimulations/app.py" ]; then
+                echo ""
+                echo -e "  ${RED}mcsimulations/app.py not found — UI unavailable on this machine.${RESET}"
+                echo -e "  ${DIM}This dashboard lives outside git. Pull it from your other host.${RESET}"
+                echo ""
+                read -rp "  Press Enter to return to menu..."
+            else
+                run_command \
+                    "Risk-of-Ruin Dashboard — open http://localhost:8502  (Ctrl-C to stop)" \
+                    "$PYTHON -m streamlit run mcsimulations/app.py --server.port 8502 --server.headless true"
+            fi
             ;;
         t|T)
             echo ""
