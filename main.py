@@ -936,7 +936,10 @@ def _train_hmm(
         4,
         f"Fitting HMM: {len(features_clean)} bars × candidates={_n_cands} × n_init={_n_init}",
     ):
-        engine.fit(features_clean.values)
+        # Pass the DataFrame (not .values) so the engine captures column
+        # names. Required for the prototype labeller to find realized_vol_20
+        # at the right column. Falls back gracefully on legacy ndarray input.
+        engine.fit(features_clean)
     engine._n_train_bars = len(features_clean)   # stored for logging
 
     # Attach in-sample regime sequence for post-training stats display

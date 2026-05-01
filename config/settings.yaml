@@ -42,6 +42,17 @@ hmm:
   use_vix_features: true
   use_credit_spread_features: false
   regime_proxy: QQQ
+  # 2026-05-02 — drop adx_14: it's direction-agnostic, so strong UP-trends
+  # (rallies to ATH) generate the same high-ADX signature the model learned
+  # to associate with crashes. Diagnostic confirmed adx_14 was the only
+  # feature firing CRASH; vol+dist_sma200+VIX alone carry the regime signal
+  # cleanly. features_override wins over extended/VIX flags.
+  features_override:
+  - log_ret_1
+  - realized_vol_20
+  - vol_ratio
+  - dist_sma200
+  - vix_zscore_60
   features:
   - log_ret_1
   - realized_vol_20

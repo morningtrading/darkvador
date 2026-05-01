@@ -177,6 +177,13 @@ class HMMEngine:
         self._training_bic: float = np.inf
         self._training_date: Optional[pd.Timestamp] = None
         self._n_features: int = 0
+        # Names of the features the engine was trained on (e.g.
+        # ["log_ret_1", "realized_vol_20", "vol_ratio", ...]). Set when
+        # fit() is called with a DataFrame or with an explicit
+        # ``feature_names=`` kwarg. Used by _resolve_vol_index() so the
+        # prototype-matcher and regime_info report the right column for
+        # realized_vol_20 regardless of the surrounding feature set.
+        self._feature_names: Optional[List[str]] = None
         self._is_fitted: bool = False
 
         # Stability-filter state (updated by update(), reset by fit())
@@ -195,8 +202,9 @@ class HMMEngine:
 
     def fit(
         self,
-        features: np.ndarray,
+        features,
         lengths: Optional[List[int]] = None,
+        feature_names: Optional[List[str]] = None,
     ) -> "HMMEngine":
         """
         Select and fit the best Gaussian HMM via BIC.
@@ -208,11 +216,19 @@ class HMMEngine:
         Parameters
         ----------
         features :
-            2-D array of shape ``(n_bars, n_features)``.  Should already be
-            z-score standardised via :class:`~data.feature_engineering.FeatureEngineer`.
+            Either a 2-D ``np.ndarray`` of shape ``(n_bars, n_features)`` or a
+            ``pd.DataFrame``.  When a DataFrame is provided, its column names
+            are captured into ``self._feature_names`` so the prototype labeller
+            and ``regime_info`` can locate ``realized_vol_20`` correctly
+            regardless of feature ordering.  Should already be z-score
+            standardised via :class:`~data.feature_engineering.FeatureEngineer`.
         lengths :
             Optional sequence lengths for multi-sequence training.  Defaults
             to ``[n_bars]`` (single sequence).
+        feature_names :
+            Optional explicit feature names list.  Wins over DataFrame column
+            inference.  Pass this when ``features`` is an ndarray but you
+            still want the engine to know what each column represents.
 
         Returns
         -------
@@ -223,6 +239,14 @@ class HMMEngine:
         ValueError  if ``n_bars < min_train_bars``.
         RuntimeError  if every candidate model fails to converge.
         """
+        # Capture feature names if available, then unwrap to ndarray.
+        if feature_names is not None:
+            self._feature_names = list(feature_names)
+        elif isinstance(features, pd.DataFrame):
+            self._feature_names = list(features.columns)
+        # Convert DataFrame → ndarray (the rest of the function expects 2-D array).
+        if isinstance(features, pd.DataFrame):
+            features = features.values
         n_samples, n_features = features.shape
         if n_samples < self.min_train_bars:
             raise ValueError(
@@ -596,6 +620,7 @@ class HMMEngine:
             "model": self._model,
             "n_states": self._n_states,
             "n_features": self._n_features,
+            "feature_names": self._feature_names,
             "state_to_label": self._state_to_label,
             "regime_info": self._regime_info,
             "training_bic": self._training_bic,
@@ -639,6 +664,8 @@ class HMMEngine:
         engine._model = payload["model"]
         engine._n_states = payload["n_states"]
         engine._n_features = payload["n_features"]
+        # feature_names was added 2026-05-02; older pickles won't have it.
+        engine._feature_names = payload.get("feature_names")
         engine._state_to_label = payload["state_to_label"]
         engine._regime_info = payload["regime_info"]
         engine._training_bic = payload["training_bic"]
@@ -908,22 +935,24 @@ class HMMEngine:
             return
 
         mean_ret = self._model.means_[:, 0]           # log_ret_1 z
-        # realized_vol_20 lives at column 3 when extended_features are on
-        # (log_ret_1, realized_vol_5, log_ret_5, realized_vol_20, ...).
-        # For the minimal 2-feature setup [log_ret_1, realized_vol_20]
-        # it's at column 1.
-        if self._n_features > 3:
-            mean_vol = self._model.means_[:, 3]
-        elif self._n_features > 1:
-            mean_vol = self._model.means_[:, 1]
-        else:
-            # No vol feature available → fall back
+        # Find realized_vol_20 dynamically — its column index varies with
+        # the configured feature set.  The old code hardcoded `[:, 3]`
+        # which silently treated `adx_14` (or `dist_sma200` after the
+        # adx_14 drop) as the vol axis, producing inverted regime labels.
+        vol_idx = self._resolve_vol_index()
+        if vol_idx is None:
             logger.warning(
-                "n_features=%d — no vol feature for prototype matching; "
+                "n_features=%d — could not locate realized_vol_20 column; "
                 "falling back to sort-by-return.", self._n_features,
             )
             self._label_states_by_return()
             return
+        mean_vol = self._model.means_[:, vol_idx]
+        logger.info(
+            "Prototype labeller using vol column %d (%s)",
+            vol_idx,
+            (self._feature_names[vol_idx] if self._feature_names else "unknown"),
+        )
 
         labels = REGIME_LABELS[K]                     # 5 canonical labels
         cost = np.zeros((K, len(labels)))
@@ -951,13 +980,17 @@ class HMMEngine:
     def _build_regime_info(self) -> None:
         """Populate :attr:`_regime_info` from emission means and _LABEL_META."""
         self._regime_info = {}
+        vol_idx = self._resolve_vol_index()
         for state_id, label in self._state_to_label.items():
             meta = _LABEL_META.get(label, _LABEL_META["NEUTRAL"])
             means = self._model.means_[state_id]
 
-            # log_ret_1 at index 0; realized_vol_20 at index 3 (if available)
+            # log_ret_1 always at index 0 (canonical first feature).
+            # realized_vol_20 column is resolved from feature_names — was
+            # previously hardcoded to index 3, which was wrong for every
+            # shipped feature preset.  See _resolve_vol_index() for details.
             exp_ret = float(means[0])
-            exp_vol = float(means[3]) if len(means) > 3 else 0.0
+            exp_vol = float(means[vol_idx]) if vol_idx is not None else 0.0
 
             self._regime_info[label] = RegimeInfo(
                 regime_id=state_id,
@@ -971,6 +1004,38 @@ class HMMEngine:
             )
 
     # ── Private — helpers ──────────────────────────────────────────────────────
+
+    def _resolve_vol_index(self) -> Optional[int]:
+        """Find the column index of ``realized_vol_20`` in the trained features.
+
+        Resolution order:
+          1. ``self._feature_names`` exact match on ``"realized_vol_20"``.
+          2. ``self._feature_names`` first column whose name starts with
+             ``"realized_vol"`` (handles 5/10/60-bar variants).
+          3. Legacy fallback by ``self._n_features`` against the canonical
+             presets in ``data/feature_engineering.py`` — all of which place
+             ``realized_vol_20`` at index 1.  Returns 1 for any feature count
+             ≥ 2 in this fallback.
+          4. ``None`` if no plausible column exists.
+
+        Replaces the old hardcoded ``means_[:, 3]`` lookup that silently
+        treated whichever feature happened to land at column 3 (``adx_14``
+        in the 6-feature set, ``dist_sma200`` in the 5-feature set) as if
+        it were realised volatility — leading to inverted regime labels.
+        """
+        names = self._feature_names
+        if names:
+            if "realized_vol_20" in names:
+                return names.index("realized_vol_20")
+            for i, n in enumerate(names):
+                if n.startswith("realized_vol"):
+                    return i
+            return None
+        # Names unknown — fall back on the canonical preset layout
+        # (every shipped feature list places realized_vol_20 at index 1).
+        if self._n_features >= 2:
+            return 1
+        return None
 
     def _require_fitted(self) -> None:
         if not self._is_fitted:
