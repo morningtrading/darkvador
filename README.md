@@ -28,12 +28,11 @@ Supporting layer runs in parallel:
 
 ## Multi-Strategy Mode
 
-The multi-strategy framework can run several strategies in parallel under
-a single capital allocator and a portfolio-level risk manager.
-**Currently implemented:** `hmm_regime` only. The `strategies:` block in
-`config/settings.yaml` lists scaffolding for future strategies
-(`momentum_breakout`, `mean_reversion`, `bond_trend`, `commodity_momentum`,
-`crypto_momentum`) — all `enabled: false` until they're built.
+The system can run several strategies in parallel under a single capital
+allocator and a portfolio-level risk manager. **Active strategies:** `hmm_regime`
+(S&P 500 regime detection) and `momentum_breakout` (large-cap tech). Other
+strategy implementations (mean-reversion, bond, commodity) are disabled by
+default as they underperform the current equity-focused universe.
 
 ```
 StrategyRegistry  ─►  CapitalAllocator  ─►  PortfolioRiskManager  ─►  Broker
@@ -44,18 +43,211 @@ StrategyRegistry  ─►  CapitalAllocator  ─►  PortfolioRiskManager  ─►
 
 ### Quick start
 
-All commands assume the venv is active (`source .venv/bin/activate`).
-
 ```bash
 # Paper trade with all enabled strategies from settings.yaml + inverse-vol allocator
-python main.py trade --paper
+py -3.12 main.py trade --paper
 
 # Pick a different allocator approach
-python main.py trade --paper --allocator risk_parity
+py -3.12 main.py trade --paper --allocator risk_parity
+
+# Restrict to a subset of strategies
+py -3.12 main.py trade --paper --strategies hmm_regime,momentum_breakout
 
 # Backtest the multi-strategy stack
-python main.py backtest --multi-strat --allocator inverse_vol
+py -3.12 main.py backtest --multi-strat --allocator inverse_vol
 ```
+
+### Regime Momentum 01 backtest
+
+### Explain Like I'm 10
+
+This bot is a robot helper for a paper trading account.
+
+It watches real market data from Alpaca. It does not guess randomly. First, it
+asks: "Is the market calm, normal, or dangerous?" That answer comes from the
+regime detector.
+
+The regime detector is like a weather forecast for the market:
+
+- calm market: the bot is allowed to buy more
+- normal market: the bot can buy, but more carefully
+- scary market: the bot stays in cash
+
+The strategy is called `regime_momentum_01`. It looks for stocks or ETFs that
+are already moving up. It only buys assets that are above their long trend line
+and have positive momentum. Then it chooses the best ranked assets.
+
+The current paper-live bot does this every 15 minutes:
+
+1. Download recent Alpaca market data.
+2. Detect the current market regime.
+3. Rank the assets by momentum.
+4. Compare target positions with the Alpaca paper account.
+5. Send paper orders only if the market is open and the strategy wants exposure.
+6. Write a cycle log even when there are no trades.
+7. Send Telegram messages when Telegram credentials are configured.
+
+Paper-live uses `regime_momentum_01.live_data_feed: iex` by default. Backtests
+can still use SIP adjusted data, but live/paper polling should avoid recent SIP
+queries unless the Alpaca account has the required SIP subscription.
+
+Right now this is still research and paper trading. A profitable backtest does
+not mean guaranteed profit in live trading.
+
+### Main Parameters
+
+```yaml
+strategy_id: regime_momentum_01
+asset_group: alpaca_momentum10
+symbols: [NVDA, META, XLI, MSFT, GLD, XLK, XLY, QQQ, AAPL, XLU]
+broker: Alpaca paper
+data_feed: sip
+adjustment: all
+timeframe: 1Hour
+paper_loop_interval: 900 seconds
+paper_loop_interval_human: 15 minutes
+history_days_for_live_signal: 540
+regime_proxy: QQQ
+trend_filter: close above SMA200
+momentum_fast: 24 bars
+momentum_slow: 120 bars
+n_regimes: 5
+regime_names: [CRASH, BEAR, NEUTRAL, BULL, EUPHORIA]
+top_n: 5
+rebalance_interval: 13 bars
+low_vol_allocation: 100%
+mid_vol_allocation: 80%
+high_vol_allocation: 0%
+leverage: 1.0x
+min_order_notional: 250 USD
+```
+
+Telegram credentials go in:
+
+```text
+config/credentials.yaml
+```
+
+Example:
+
+```yaml
+telegram:
+  token: "YOUR_BOTFATHER_TOKEN"
+  chat_id: "YOUR_CHAT_ID"
+```
+
+`regime_momentum_01` is an intraday strategy for Alpaca liquid stocks and
+ETFs. The HMM only controls the risk budget; entries and exits come from a
+tradable momentum filter: close above SMA200, positive 24-bar and 120-bar
+momentum, then hold the top symbols ranked by risk-adjusted momentum.
+
+Default basket: `alpaca_momentum10` in `config/asset_groups.yaml`.
+
+Default walk-forward:
+
+```yaml
+train_window: 520
+test_window: 130
+step_size: 130
+timeframe: 1Hour
+data_feed: sip
+adjustment: all
+n_candidates: [5]
+top_n: 5
+rebalance_interval: 13
+low_vol_allocation: 1.00
+mid_vol_allocation: 0.80
+high_vol_allocation: 0.00
+leverage: 1.0x
+```
+
+Latest focused optimization on `2024-01-01 -> 2025-06-30` found the current
+default as the best risk-adjusted variant in the tested grid:
+`+13.06%` total return, Sharpe `1.35`, max drawdown `-3.72%`. A more
+concentrated variant reached `+15.64%` with higher drawdown. Treat these as
+walk-forward research results, not a live-trading guarantee; validate on a
+fresh out-of-sample window before allocating capital.
+
+Run from WSL:
+
+```bash
+cd /root/regime-trader-work
+.venv/bin/python main.py regime-momentum --asset-group alpaca_momentum10 --start 2024-01-01 --end 2025-06-30
+```
+
+Run from Windows PowerShell through WSL:
+
+```powershell
+wsl.exe -d Ubuntu-24.04 -- bash -lc "cd /root/regime-trader-work && .venv/bin/python main.py regime-momentum --asset-group alpaca_momentum10 --start 2024-01-01 --end 2025-06-30"
+```
+
+Results are written under `savedresults/regime_momentum_01_<timestamp>/`:
+`equity_curve.csv`, `weights.csv`, `trades.csv`, `regimes.csv`, `folds.csv`,
+`summary.csv`, and `symbols.txt`.
+
+For paper-live Telegram notifications, add Telegram credentials to
+`config/credentials.yaml`:
+
+```yaml
+telegram:
+  token: "YOUR_BOTFATHER_TOKEN"
+  chat_id: "YOUR_CHAT_ID"
+```
+
+Every Telegram message must include an explicit account-mode line. The
+paper-live runner sends `Account: ALPACA PAPER ACCOUNT - not live cash`; future
+live-cash runners must send `Account: LIVE CASH ACCOUNT`.
+
+Then start the guarded paper loop:
+
+```bash
+.venv/bin/python scratchpad/SCA_regime_momentum_01_paper_live.py --loop --execute
+```
+
+Start the browser dashboard:
+
+```bash
+.venv/bin/streamlit run dashboard/SCA_streamlit_dashboard.py --server.address 0.0.0.0 --server.port 8501
+```
+
+Then open:
+
+```text
+http://localhost:8501
+```
+
+The dashboard reads:
+
+```text
+savedresults/SCA_regime_momentum_01_live/SCA_paper_live_cycles.csv
+savedresults/SCA_regime_momentum_01_live/SCA_paper_live_orders.csv
+savedresults/SCA_regime_momentum_01_live/SCA_paper_live_errors.csv
+```
+
+The top of the dashboard shows a large health banner: green for `ALL IS OKAY`,
+red for `ERROR DETECTED - ACTION NEEDED`, and orange while the bot is running
+but waiting for the first logged cycle.
+
+The `Scan` tab shows the configured paper-live scan universe, the last cycle
+timestamp, the first logged cycle timestamp, and the estimated minutes until the
+next scan. Current logs are cycle-level, so every symbol shares the same last
+scan timestamp.
+
+The `Errors` tab includes `Clear Errors`, guarded by a confirmation checkbox.
+It archives `SCA_paper_live_errors.csv` under
+`savedresults/SCA_regime_momentum_01_live/SCA_error_archive_*` instead of
+deleting it.
+
+The `Control` tab provides a tiled command deck to start or stop the WSL
+paper-live bot and reset dashboard statistics. Start, stop, and reset require
+an explicit confirmation checkbox. Stop sends SIGTERM first, then uses SIGKILL
+if the process is still alive after a short wait. Reset does not delete
+history; it archives the current CSV files under
+`savedresults/SCA_regime_momentum_01_live/SCA_reset_archive_*`.
+
+The `Process` tab starts with a plain-language conclusion so the operator can
+see whether the dashboard and paper-live bot are healthy before reading raw
+process details.
 
 Available `--allocator` values: `equal_weight`, `inverse_vol` (default),
 `risk_parity`, `performance_weighted`. Strategies and their per-strategy
@@ -76,8 +268,8 @@ The HMM maps its internal states to vol tiers by sorting them on expected volati
 |---|---|---|---|
 | `low_vol` | Calmest HMM state, trending | 95% of equity | 1.25× |
 | `mid_vol` (trend) | Transition, price above 50 EMA | 95% of equity | 1.0× |
-| `mid_vol` (no trend) | Transition, price below 50 EMA | 70% of equity | 1.0× |
-| `high_vol` | Most volatile HMM state | 60% of equity | 1.0× |
+| `mid_vol` (no trend) | Transition, price below 50 EMA | 75% of equity | 1.0× |
+| `high_vol` | Most volatile HMM state | 75% of equity | 1.0× |
 
 Allocations above are the **base** (`settings.yaml`). Config sets override them — see [Config sets](#config-sets).
 
@@ -142,9 +334,7 @@ regime-trader/
 
 ## Quick start
 
-### 1. Install (Linux — only supported platform)
-
-Linux is the canonical and only supported platform — verified on **WSL2 (Ubuntu 24.04)** and a **Linux VPS**. The same `install.sh` produces an identical, working environment on both.
+### 1. Install (Linux / VPS / WSL2 — recommended)
 
 **One-command install** — handles Python check, venv, packages, credentials, and tests:
 
@@ -175,35 +365,38 @@ sudo apt-get update && sudo apt-get install -y python3.12 python3.12-venv python
 
 ---
 
-### Manual install
+### Manual install (any platform)
 
 ```bash
-# Linux (native or WSL2) — supported
+# Linux / macOS / WSL2
 python3.12 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+
+# Windows (PowerShell)
+py -3.12 -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
 ```
 
-> **⚠️ Linux is the sole reference platform**
+> **✅ Cross-platform reproducibility**
 >
-> All published numbers come from Linux (native, WSL2, or VPS — all produce
-> identical, deterministic output). **Windows native is not supported for
-> evaluation.** The Win/Linux divergence we tracked down was driven by the
-> **VIX feature**, not by HMM math: yfinance ^VIX downloads were
-> non-deterministic, with a silent fallback to the Alpaca VXX ETF (a
-> different instrument), so the two machines computed different feature
-> matrices and therefore different regime labels. Fixed by pinning yfinance
-> and raising on silent VXX fallback (commits `0c99539`, `91a3f9d`,
-> `787f7ac`). The HMM EM itself is deterministic with `random_state` fixed.
+> Backtest results are **deterministic across Linux and Windows** when both
+> platforms have the full dependency set installed. Verified on 2026-04-25:
+> Windows native Python 3.12 and WSL2 Ubuntu 24.04 produce **identical** output
+> (Total Return +85.02% | Sharpe 1.129 | MaxDD -13.0% | 511 trades — stocks4
+> basket, 2020-01-01 → 2026-04-25, conservative set, `enforce_stops=False`).
 >
-> **Reference results** (stocks basket = SPY, QQQ, AAPL, MSFT, NVDA;
-> 2020-01-01 → 2026-04-26; balanced set; `enforce_stops=false`):
-> `Total Return +174.56% | CAGR +26.83% | Sharpe 1.08 | Calmar 1.68 | MaxDD -15.99%` (commit `51ea720`).
+> A previously suspected BLAS/floating-point divergence turned out to be a
+> **missing `yfinance` package** on one platform: `data/vix_fetcher.py`
+> silently fell back from yfinance ^VIX to Alpaca VXX (a different instrument),
+> shifting all VIX-based features and the resulting trades. Always
+> `pip install -r requirements.txt` on every platform.
 >
-> If you must edit on Windows, use WSL2 for the venv, the install, and every
-> run. Do **not** operate on `.venv/` through the `\\wsl.localhost\…` Windows
-> mount — it corrupts symlinks and bakes wrong shebangs into the wrapper
-> scripts.
+> The project uses the modern `alpaca-py` SDK. The retired
+> `alpaca-trade-api` package is intentionally not installed because its
+> `websockets<11` constraint conflicts with the current `yfinance` dependency
+> used for real VIX data.
 
 ### 2. Credentials
 
@@ -240,7 +433,7 @@ The menu shows the active asset group and config set, and exposes all run modes 
 ### 4. Run a backtest from the CLI
 
 ```bash
-python main.py backtest --asset-group stocks --start 2020-01-01 --compare
+py -3.12 main.py backtest --asset-group stocks --start 2020-01-01 --compare
 ```
 
 `--compare` adds buy-and-hold and SMA-200 benchmark columns.
@@ -248,19 +441,19 @@ python main.py backtest --asset-group stocks --start 2020-01-01 --compare
 ### 5. Run stress tests
 
 ```bash
-python main.py stress --asset-group stocks --start 2019-01-01
+py -3.12 main.py stress --asset-group stocks --start 2019-01-01
 ```
 
 ### 6. Start paper trading
 
 ```bash
-python main.py trade --paper
+py -3.12 main.py trade --paper
 ```
 
 ### 7. Run the test suite
 
 ```bash
-python -m pytest tests/ -v
+py -3.12 -m pytest tests/ -v
 ```
 
 ---
@@ -272,7 +465,7 @@ Named parameter sets live in `config/sets/`. Each file contains only the overrid
 | Set | Focus | Key differences from base |
 |---|---|---|
 | `conservative` | Capital preservation | No leverage, stability=9 bars, high_vol alloc=45%, rebalance threshold=25% |
-| `balanced` | Recommended default — current `active_set` | stability=7, flicker=4, min_confidence=0.62, high_vol=60%, slippage=5 bps |
+| `balanced` | Recommended default | stability=7, flicker=4, min_confidence=0.62, high_vol=60%, slippage=10 bps |
 | `aggressive` | Max deployment | 1.5× leverage, stability=5, low_vol=100%, rebalance threshold=10% |
 
 ### Switching sets
@@ -282,8 +475,8 @@ Named parameter sets live in `config/sets/`. Each file contains only the overrid
 **Via CLI for a single run** (does not change `active_set`):
 
 ```bash
-python main.py backtest --asset-group stocks --start 2020-01-01 --set conservative
-python main.py backtest --asset-group stocks --start 2020-01-01 --set aggressive
+py -3.12 main.py backtest --asset-group stocks --start 2020-01-01 --set conservative
+py -3.12 main.py backtest --asset-group stocks --start 2020-01-01 --set aggressive
 ```
 
 ### Adding a custom set
@@ -320,10 +513,10 @@ Key HMM parameters explained:
 
 | Parameter | Default | Effect |
 |---|---|---|
-| `stability_bars` | 12 (base) / 7 (balanced) | Bars in same state required to confirm a regime flip |
-| `flicker_threshold` | 4 (base) / 4 (balanced) | Max regime changes in `flicker_window` before uncertainty mode |
-| `min_confidence` | 0.62 (base) / 0.62 (balanced) | HMM posterior floor — below this, position sizes are halved |
-| `n_candidates` | [5] | Single fixed state count for cross-machine reproducibility (was [3..7] historically) |
+| `stability_bars` | 5 (base) / 7 (balanced) | Bars in same state required to confirm a regime flip |
+| `flicker_threshold` | 2 (base) / 4 (balanced) | Max regime changes in `flicker_window` before uncertainty mode |
+| `min_confidence` | 0.70 (base) / 0.62 (balanced) | HMM posterior floor — below this, position sizes are halved |
+| `n_candidates` | [3,4,5,6,7] | State counts tested; best selected by BIC |
 
 ---
 
@@ -379,7 +572,7 @@ The high per-fold variance (CoV = 1.39) is a property of the short 63-bar OOS wi
 
 ## Risk controls
 
-Every order passes through `RiskManager.validate_signal()` — a multi-layer gate (~13 distinct checks; circuit-breaker rows below collapse to one check returning multiple states):
+Every order passes through `RiskManager.validate_signal()` — a 16-layer gate:
 
 | Check | Default | Breach behaviour |
 |---|---|---|
@@ -390,8 +583,7 @@ Every order passes through `RiskManager.validate_signal()` — a multi-layer gat
 | Weekly drawdown reduce | 5% | Position sizes halved |
 | Daily drawdown reduce | 2% | Position sizes halved |
 | Max daily trades | 20 | Circuit breaker halt |
-| Stop-loss mandatory | — | Trade rejected if no stop provided (sizing requires it; in-bar enforcement is opt-in — see Stop loss section) |
-| Bid-ask spread | configurable cap | Trade rejected if spread > cap |
+| Stop-loss mandatory | — | Trade rejected if no stop provided |
 | Duplicate order | 60 s window | Trade rejected |
 | Max concurrent positions | 5 | Trade rejected |
 | 1% risk rule | 1% of equity / \|entry−stop\| | Size capped |
@@ -426,15 +618,7 @@ There is no traditional entry trigger. The position is opened as soon as the HMM
 
 ### Stop loss
 
-The strategy attaches an ATR/EMA-based stop level to every signal so the
-RiskManager can size positions against a defined per-trade risk budget
-(`RiskManager.validate_signal` rejects any signal lacking a stop). **Stops
-are NOT enforced in the backtest by default** — `enforce_stops: false`,
-which aligns the backtest with the live broker's actual behaviour (commit
-`f84b278`). Pass `--enforce-stops` to the backtest CLI to enable in-bar
-stop-outs; bullish / EUPHORIA regimes remain exempt even then.
-
-Stop formulas (used for position sizing, and for in-bar exit when enforced):
+Every signal carries a stop computed from the current bar's ATR and EMA:
 
 | Regime | Stop formula |
 |---|---|
@@ -446,13 +630,9 @@ Stop formulas (used for position sizing, and for in-bar exit when enforced):
 
 If the HMM posterior is below `min_confidence`, the regime is flickering, or the new state is not yet confirmed, all position sizes are halved and leverage is dropped to 1.0×.
 
-**In plain English:** when the model isn't sure what kind of market we're in — either its confidence score is too low, the regime keeps flipping back and forth between bars, or we just switched regimes and haven't seen enough confirmation yet — the bot plays it safe. It cuts every position size in half and turns off leverage (so no borrowing, just cash positions). The idea is simple: if you're not sure, take smaller bets.
-
 ### Rebalance filter
 
 A rebalance is skipped when the new target weight is within `rebalance_threshold` (relative) of the current weight. Default in `balanced` set: 18%.
-
-**In plain English:** if the new target allocation is very close to what we already hold, the bot doesn't bother trading. For example, if we currently hold 10% in a stock and the new target is 11%, that's only a 10% relative change — below the 18% threshold — so we leave it alone. This avoids constantly placing tiny orders that just burn commissions and slippage without meaningfully changing the portfolio.
 
 ---
 
@@ -489,7 +669,8 @@ To switch from paper to live:
 ## Development notes
 
 - **Python version**: 3.12 required (`hmmlearn` has no wheels for 3.13+)
-- **Run scripts**: activate the venv (`source .venv/bin/activate`) then use `python`
+- **Run scripts**: always use `py -3.12` on Windows, not `python`
+- **Windows terminal**: `Console(force_terminal=True, legacy_windows=False)` avoids `UnicodeEncodeError` on cp1252 terminals
 - **Test isolation**: all broker tests use `MagicMock(spec=AlpacaClient)` — no real network calls
 - **Async in sync codebase**: WebSocket streams run via `asyncio.new_event_loop()` in daemon threads, keeping the main trading loop synchronous
 - **hmmlearn convergence warnings**: silenced at `ERROR` level — the tiny negative deltas (~1e-5) are floating-point noise, not real divergence
