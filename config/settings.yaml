@@ -5,30 +5,19 @@
 # made from Linux runs only.
 # ──────────────────────────────────────────────────────────────────────────────
 broker:
-  provider: alpaca       # broker adapter name. Resolved by broker.get_broker().
-                         #  Supported today: alpaca. Future: mt5, ibkr, tradier,
-                         #  tradestation, binance, coinbase, ... (each is a
-                         #  BaseBroker subclass added to broker/).
   paper_trading: true
-  asset_group: stocks    # symbols resolved from config/asset_groups.yaml
-  timeframe: 5Min        # main-loop cadence: how often the bot wakes up to
-                         #  evaluate signals, check risk, post fills. Set to
-                         #  5Min for paper testing of intraday behaviour.
-                         #  Supported: 1Day, 1Hour, 5Min, 1Min.
+  asset_group: stocks4
+  symbols:
+  - SPY
+  - QQQ
+  - AAPL
+  - MSFT
+  - NVDA
+  timeframe: 5Min
   base_url_paper: https://paper-api.alpaca.markets
   base_url_live: https://api.alpaca.markets
   data_feed: iex
 hmm:
-  timeframe: 1Day        # bar size on which the HMM is trained and predicts
-                         #  regimes. Independent from broker.timeframe so the
-                         #  main loop can tick intraday while regimes stay
-                         #  macro (the original design intent — regimes are
-                         #  not meant to flicker on 5-min noise).
-  label_mode: prototype  # "sort"      → label states by ascending mean return
-                         #  "prototype" → match states to fixed (vol_z, ret_z)
-                         #               targets so labels stay stable across
-                         #               retrains. Piste 3 default — see
-                         #               core/hmm_engine.py:_PROTOTYPES_5.
   n_candidates:
   - 5
   n_init: 10
@@ -42,17 +31,6 @@ hmm:
   use_vix_features: true
   use_credit_spread_features: false
   regime_proxy: QQQ
-  # 2026-05-02 — drop adx_14: it's direction-agnostic, so strong UP-trends
-  # (rallies to ATH) generate the same high-ADX signature the model learned
-  # to associate with crashes. Diagnostic confirmed adx_14 was the only
-  # feature firing CRASH; vol+dist_sma200+VIX alone carry the regime signal
-  # cleanly. features_override wins over extended/VIX flags.
-  features_override:
-  - log_ret_1
-  - realized_vol_20
-  - vol_ratio
-  - dist_sma200
-  - vix_zscore_60
   features:
   - log_ret_1
   - realized_vol_20
@@ -110,6 +88,42 @@ backtest:
   sma_long: 200
   ema_fast: 9
   ema_slow: 45
+regime_momentum_01:
+  strategy_id: regime_momentum_01
+  timeframe: 1Hour
+  data_feed: sip
+  adjustment: all
+  regime_proxy: QQQ
+  initial_capital: 100000
+  top_n: 5
+  trend_ma: 200
+  momentum_fast: 24
+  momentum_slow: 120
+  vol_window: 120
+  atr_window: 14
+  rebalance_interval: 13
+  slippage_pct: 0.0005
+  train_window: 520
+  test_window: 130
+  step_size: 130
+  min_train_bars: 390
+  max_single_position: 0.15
+  n_candidates: [5]
+  n_init: 5
+  stability_bars: 6
+  flicker_window: 20
+  flicker_threshold: 5
+  min_confidence: 0.60
+  low_vol_allocation: 1.00
+  mid_vol_allocation: 0.80
+  high_vol_allocation: 0.00
+  unconfirmed_allocation_mult: 0.50
+  live_loop_interval_seconds: 900
+  live_history_days: 540
+  live_min_notional: 250
+  live_data_feed: iex
+  live_telegram_enabled: true
+  live_telegram_status_every_cycles: 1
 monitoring:
   dashboard_refresh_seconds: 5
   alert_rate_limit_minutes: 15
@@ -159,24 +173,6 @@ strategies:
     - ETH/USD
     weight_min: 0.05
     weight_max: 0.30
-  mean_reversion_qqq_spy:
-    enabled: true            # ACTIVATED — multi-strategy mode at next live launch
-                             # (combines with hmm_regime). Roll back via
-                             # `git checkout pre-mr-integration` or flip back to
-                             # false here if it misbehaves.
-    symbols:                 # the orchestrator hard-requires both legs;
-    - QQQ                    # missing one → no signals (it logs and skips).
-    - SPY
-    weight_min: 0.10
-    weight_max: 0.30
-    # Strategy-specific knobs (forwarded to MeanReversionQqqSpyConfig):
-    allocation:     0.30     # total deployed across QQQ + SPY at z=0
-    lookback:       30       # z-score window in trading days
-    drift_lookback: 252      # long-window drift removal (1 year)
-    threshold:      1.5      # |z| above which the strategy reports an active tilt
-    max_tilt:       0.40     # max |0.5 - leg_weight/allocation|, kept ≤ 0.5
-    # Standalone backtest 2020-2026: Sharpe +0.67, corr w/ hmm = -0.015,
-    # MaxDD -9.4%. Combined 70/30 with hmm_regime: Sharpe 1.39 vs hmm-alone 1.31.
 
 # ── Telegram notifications ─────────────────────────────────────────────────────
 notifications:

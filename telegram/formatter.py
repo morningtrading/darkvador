@@ -1,320 +1,236 @@
 """
-telegram/formatter.py — Compact Telegram messages for Regime Trader.
-All messages: 2-4 lines max, longer lines, machine name included.
+telegram/formatter.py - Compact Telegram messages for Regime Trader.
+
+Objective
+---------
+Build short Telegram-safe HTML messages with an explicit account-mode label.
+
+Rationale
+---------
+Trading notifications must always say whether they refer to paper trading or
+live cash trading. Ambiguous alerts are dangerous when the same user may operate
+paper and live environments.
+
+Dependencies
+------------
+Reads config/settings.yaml for broker.paper_trading and savedresults/ for
+backtest summaries.
+
+Expected output
+---------------
+Small HTML-formatted Telegram messages.
+
+How to test
+-----------
+python -m py_compile telegram/formatter.py
+python telegram/hooks.py test
 """
 from __future__ import annotations
+
 import json
-import platform
 import socket
-import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+import yaml
+
+
 ROOT = Path(__file__).resolve().parent.parent
-
 _HOST = socket.gethostname()
-BOT_NAME = ROOT.name
-
-
-def _local_ip() -> str:
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            s.settimeout(0.2)
-            s.connect(("10.255.255.255", 1))
-            return s.getsockname()[0]
-    except Exception:
-        return "?"
-
-
-def _os_short() -> str:
-    rel = platform.uname().release.lower()
-    if "microsoft" in rel or "wsl" in rel:
-        return "WSL2"
-    return platform.system()
-
-
-def _git_sha() -> str:
-    try:
-        out = subprocess.run(
-            ["git", "rev-parse", "--short", "HEAD"],
-            cwd=ROOT, capture_output=True, text=True, timeout=1,
-        )
-        if out.returncode == 0 and out.stdout.strip():
-            return out.stdout.strip()
-    except Exception:
-        pass
-    return "?"
-
-
-_IP  = _local_ip()
-_OS  = _os_short()
-_SHA = _git_sha()
-
-
-def _header() -> str:
-    return f"<code>{BOT_NAME} · {_HOST} · {_IP} · {_OS} · #{_SHA}</code>"
-
-
-def _active_set_name() -> str:
-    """Read config/active_set; fallback to 'base' if absent or empty."""
-    p = ROOT / "config" / "active_set"
-    if p.exists():
-        s = p.read_text().strip()
-        if s:
-            return s
-    return "base"
-
-
-def _set_str(cfg_set: str) -> str:
-    """Format the set name as a bracketed suffix to a group label."""
-    return f"  [{cfg_set}]" if cfg_set else ""
-
-
-def _proxy_str(proxy: str) -> str:
-    """Format the HMM regime-proxy symbol as a compact title-line suffix."""
-    return f"  · HMM: <code>{proxy}</code>" if proxy else ""
-
-
-def _active_proxy() -> str:
-    """Best-effort read of hmm.regime_proxy from current config (settings.yaml +
-    active set). Used for live messages where no run_context is available."""
-    try:
-        import sys as _sys
-        _sys.path.insert(0, str(ROOT))
-        from main import load_config
-        cfg = load_config()
-        return cfg.get("hmm", {}).get("regime_proxy", "")
-    except Exception:
-        return ""
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).strftime("%d %b %Y %H:%M UTC")
 
+
 def _pct(v: float) -> str:
     return f"{'+' if v >= 0 else ''}{v * 100:.2f}%"
 
+
+def account_label() -> str:
+    settings_path = ROOT / "config" / "settings.yaml"
+    if not settings_path.exists():
+        return "ACCOUNT MODE UNKNOWN"
+    raw = yaml.safe_load(settings_path.read_text(encoding="utf-8")) or {}
+    paper_trading = raw.get("broker", {}).get("paper_trading")
+    if paper_trading is True:
+        return "PAPER ACCOUNT - not live cash"
+    if paper_trading is False:
+        return "LIVE CASH ACCOUNT"
+    return "ACCOUNT MODE UNKNOWN"
+
+
+def _account_line() -> str:
+    return f"Account: <b>{account_label()}</b>"
+
+
 def _latest_backtest_dir() -> Optional[Path]:
-    sr = ROOT / "savedresults"
-    if not sr.exists():
+    savedresults = ROOT / "savedresults"
+    if not savedresults.exists():
         return None
-    dirs = sorted(sr.glob("backtest_*"), reverse=True)
+    dirs = sorted(savedresults.glob("backtest_*"), reverse=True)
     return dirs[0] if dirs else None
 
 
-# ── Formatters ────────────────────────────────────────────────────────────────
-
 def format_test() -> str:
     return (
-        f"{_header()}\n"
-        f"✅ <b>Regime Trader — connexion OK</b>  active set: <code>{_active_set_name()}</code>{_proxy_str(_active_proxy())}  ·  <i>{_now()}</i>"
+        "<b>Regime Trader - connection OK</b>\n"
+        f"{_account_line()}\n"
+        f"Machine: <code>{_HOST}</code> - {_now()}"
     )
 
 
 def format_backtest_summary() -> str:
-    d = _latest_backtest_dir()
-    if d is None:
-        return "❌ Aucun résultat de backtest trouvé."
+    directory = _latest_backtest_dir()
+    if directory is None:
+        return f"No backtest result found.\n{_account_line()}"
 
-    csv_path = d / "performance_summary.csv"
-    ctx_path = d / "run_context.json"
+    csv_path = directory / "performance_summary.csv"
+    ctx_path = directory / "run_context.json"
     if not csv_path.exists():
-        return f"❌ performance_summary.csv introuvable dans {d.name}"
+        return f"performance_summary.csv not found in {directory.name}\n{_account_line()}"
 
     import pandas as pd
-    s = pd.read_csv(csv_path, header=None, index_col=0).squeeze()
 
-    group   = "—"
-    symbols = str(s.get("symbols", "—"))
-    cfg_set, proxy = "", ""
+    summary = pd.read_csv(csv_path, header=None, index_col=0).squeeze()
+    group = "-"
+    symbols = str(summary.get("symbols", "-"))
+    cfg_set = ""
     if ctx_path.exists():
         try:
-            c = json.loads(ctx_path.read_text())
-            group   = c.get("asset_group", "—")
-            symbols = ", ".join(c.get("symbols", []))
-            cfg_set = c.get("config_set", "")
-            proxy   = c.get("regime_proxy", "")
+            context = json.loads(ctx_path.read_text(encoding="utf-8"))
+            group = context.get("asset_group", "-")
+            symbols = ", ".join(context.get("symbols", []))
+            cfg_set = context.get("config_set", "")
         except Exception:
             pass
 
-    ret    = float(s.get("total_return", 0))
-    cagr   = float(s.get("cagr", 0))
-    sharpe = float(s.get("sharpe", 0))
-    dd     = float(s.get("max_drawdown", 0))
-    calmar = float(s.get("calmar", 0))
-    trades = int(float(s.get("total_trades", 0)))
-    winr   = float(s.get("win_rate", 0))
-    folds  = int(float(s.get("n_folds", 0)))
-    start  = str(s.get("start", ""))[:10]
-    end    = str(s.get("end", ""))[:10]
+    total_return = float(summary.get("total_return", 0))
+    cagr = float(summary.get("cagr", 0))
+    sharpe = float(summary.get("sharpe", 0))
+    max_drawdown = float(summary.get("max_drawdown", 0))
+    calmar = float(summary.get("calmar", 0))
+    trades = int(float(summary.get("total_trades", 0)))
+    win_rate = float(summary.get("win_rate", 0))
+    folds = int(float(summary.get("n_folds", 0)))
+    start = str(summary.get("start", ""))[:10]
+    end = str(summary.get("end", ""))[:10]
 
+    set_str = f" [{cfg_set}]" if cfg_set else ""
     return (
-        f"{_header()}\n"
-        f"📊 <b>Backtest — {group}</b>{_set_str(cfg_set)}{_proxy_str(proxy)}\n"
-        f"<code>{symbols}</code>  ·  {start}→{end} ({folds} folds)\n"
-        f"<b>{_pct(ret)}</b>  CAGR {_pct(cagr)}  ·  Sharpe <b>{sharpe:.2f}</b>  Calmar {calmar:.2f}  MaxDD {_pct(dd)}\n"
-        f"{trades} trades  ·  {winr * 100:.1f}% win  ·  <i>{_now()}</i>"
+        f"<b>Backtest - {group}</b>{set_str} <code>{_HOST}</code>\n"
+        f"{_account_line()}\n"
+        f"<code>{symbols}</code> - {start}->{end} ({folds} folds)\n"
+        f"<b>{_pct(total_return)}</b> CAGR {_pct(cagr)} - Sharpe <b>{sharpe:.2f}</b> "
+        f"Calmar {calmar:.2f} MaxDD {_pct(max_drawdown)}\n"
+        f"{trades} trades - {win_rate * 100:.1f}% win - <i>{_now()}</i>"
     )
 
 
 def format_latest_trades(n: int = 5) -> str:
-    d = _latest_backtest_dir()
-    if d is None:
-        return "❌ Aucun résultat trouvé."
+    directory = _latest_backtest_dir()
+    if directory is None:
+        return f"No result found.\n{_account_line()}"
 
-    tlog = d / "trade_log.csv"
-    if not tlog.exists():
-        return "❌ trade_log.csv introuvable."
+    trade_log = directory / "trade_log.csv"
+    if not trade_log.exists():
+        return f"trade_log.csv not found.\n{_account_line()}"
 
     import pandas as pd
-    df = pd.read_csv(tlog)
-    if df.empty:
-        return "ℹ️ Aucun trade enregistré."
 
-    ret_col  = next((c for c in ["pnl_pct", "return", "pct_return", "trade_return"] if c in df.columns), None)
-    sym_col  = next((c for c in ["symbol", "ticker", "sym"] if c in df.columns), None)
+    df = pd.read_csv(trade_log)
+    if df.empty:
+        return f"No trade recorded.\n{_account_line()}"
+
+    ret_col = next((c for c in ["pnl_pct", "return", "pct_return", "trade_return"] if c in df.columns), None)
+    sym_col = next((c for c in ["symbol", "ticker", "sym"] if c in df.columns), None)
     date_col = next((c for c in ["exit_date", "date", "entry_date"] if c in df.columns), None)
 
-    ctx_path = d / "run_context.json"
-    group, cfg_set, proxy = "—", "", ""
+    ctx_path = directory / "run_context.json"
+    group = "-"
     if ctx_path.exists():
         try:
-            c = json.loads(ctx_path.read_text())
-            group   = c.get("asset_group", "—")
-            cfg_set = c.get("config_set", "")
-            proxy   = c.get("regime_proxy", "")
+            group = json.loads(ctx_path.read_text(encoding="utf-8")).get("asset_group", "-")
         except Exception:
             pass
 
-    lines = [_header(), f"📈 <b>Derniers trades — {group}</b>{_set_str(cfg_set)}{_proxy_str(proxy)}"]
+    lines = [
+        f"<b>Latest trades - {group}</b> <code>{_HOST}</code>",
+        _account_line(),
+    ]
     for _, row in df.tail(n).iterrows():
-        sym  = str(row[sym_col])  if sym_col  else "?"
+        symbol = str(row[sym_col]) if sym_col else "?"
         date = str(row[date_col])[:10] if date_col else "?"
         if ret_col:
-            r = float(row[ret_col])
-            icon = "🟢" if r >= 0 else "🔴"
-            lines.append(f"  {icon} {sym:<6} {_pct(r)}   {date}")
+            trade_return = float(row[ret_col])
+            sign = "WIN" if trade_return >= 0 else "LOSS"
+            lines.append(f"{sign} <code>{symbol}</code> {_pct(trade_return)} {date}")
         else:
-            lines.append(f"  • {sym}   {date}")
+            lines.append(f"<code>{symbol}</code> {date}")
 
     lines.append(f"<i>{_now()}</i>")
     return "\n".join(lines)
 
 
 def format_stress_summary() -> str:
-    d = _latest_backtest_dir()
+    directory = _latest_backtest_dir()
     stress = None
-    if d:
-        p = d / "stress_test_summary.csv"
-        if p.exists():
-            stress = p
+    if directory:
+        candidate = directory / "stress_test_summary.csv"
+        if candidate.exists():
+            stress = candidate
     if stress is None:
         all_stress = sorted(ROOT.glob("savedresults/backtest_*/stress_test_summary.csv"), reverse=True)
         stress = all_stress[0] if all_stress else None
     if stress is None:
-        return "❌ Aucun stress test trouvé."
+        return f"No stress test found.\n{_account_line()}"
 
     import pandas as pd
-    df = pd.read_csv(stress, index_col=0)
 
+    df = pd.read_csv(stress, index_col=0)
     ctx_path = stress.parent / "run_context.json"
-    group, cfg_set, proxy = "—", "", ""
+    group = "-"
     if ctx_path.exists():
         try:
-            c = json.loads(ctx_path.read_text())
-            group   = c.get("asset_group", "—")
-            cfg_set = c.get("config_set", "")
-            proxy   = c.get("regime_proxy", "")
+            group = json.loads(ctx_path.read_text(encoding="utf-8")).get("asset_group", "-")
         except Exception:
             pass
 
-    lines = [_header(), f"⚡ <b>Stress Test — {group}</b>{_set_str(cfg_set)}{_proxy_str(proxy)}"]
+    lines = [
+        f"<b>Stress Test - {group}</b> <code>{_HOST}</code>",
+        _account_line(),
+    ]
     for scenario, row in df.iterrows():
         sharpe = row.get("sharpe", "?")
-        dd     = row.get("max_drawdown", "?")
-        icon   = "✅" if float(str(sharpe).replace(",", ".")) > 0 else "❌"
-        lines.append(f"  {icon} <code>{scenario:<18}</code> Sh {sharpe}  DD {dd}")
+        max_drawdown = row.get("max_drawdown", "?")
+        status = "OK" if float(str(sharpe).replace(",", ".")) > 0 else "FAIL"
+        lines.append(f"{status} <code>{scenario}</code> Sh {sharpe} DD {max_drawdown}")
 
     lines.append(f"<i>{_now()}</i>")
     return "\n".join(lines)
 
 
 def format_regime_status() -> str:
-    d = _latest_backtest_dir()
-    if d is None:
-        return "❌ Aucun résultat trouvé."
+    directory = _latest_backtest_dir()
+    if directory is None:
+        return f"No result found.\n{_account_line()}"
 
-    rh = d / "regime_history.csv"
-    if not rh.exists():
-        return "❌ regime_history.csv introuvable."
+    regime_history = directory / "regime_history.csv"
+    if not regime_history.exists():
+        return f"regime_history.csv not found.\n{_account_line()}"
 
     import pandas as pd
-    df = pd.read_csv(rh, index_col=0, parse_dates=True)
+
+    df = pd.read_csv(regime_history, index_col=0)
     if df.empty:
-        return "ℹ️ Historique de régime vide."
+        return f"Regime history is empty.\n{_account_line()}"
 
-    regime_col = df.iloc[:, 0].astype(str)
-
-    # Detect bar frequency from the median spacing between bars (handles
-    # daily, hourly, 5min — independent of whatever settings.yaml claims).
-    if len(df) >= 2:
-        med = pd.Series(df.index).diff().dropna().median()
-        if med <= pd.Timedelta(minutes=10):
-            bar_freq = "5min"
-        elif med <= pd.Timedelta(hours=2):
-            bar_freq = "1h"
-        else:
-            bar_freq = "daily"
-    else:
-        bar_freq = "?"
-
-    # Run-length encode regime_col into contiguous segments.
-    changes = regime_col != regime_col.shift()
-    seg_id = changes.cumsum()
-    segments = []
-    for _, group in regime_col.groupby(seg_id):
-        segments.append({
-            "regime": group.iloc[0],
-            "start":  group.index[0],
-            "end":    group.index[-1],
-            "bars":   len(group),
-        })
-
-    icons = {"BULL": "🟢", "EUPHORIA": "🚀", "BEAR": "🔴", "CRASH": "💥", "NEUTRAL": "⚪"}
-    cur = segments[-1]
-    cur_icon = icons.get(cur["regime"].upper(), "📊")
-    cur_days = (cur["end"] - cur["start"]).days
-
-    last10 = list(reversed(segments[-10:]))
-    rows = []
-    for s in last10:
-        ic    = icons.get(s["regime"].upper(), "📊")
-        days  = (s["end"] - s["start"]).days
-        start = s["start"].strftime("%Y-%m-%d")
-        if s is segments[-1]:
-            rows.append(f"{ic} {s['regime']:<8} {start} → en cours  ({days:>3}j)")
-        else:
-            end = s["end"].strftime("%Y-%m-%d")
-            rows.append(f"{ic} {s['regime']:<8} {start} → {end}  ({days:>3}j)")
-    body = "\n".join(rows)
-
-    ctx_path = d / "run_context.json"
-    asset_grp, cfg_set, proxy = "—", "", ""
-    if ctx_path.exists():
-        try:
-            c = json.loads(ctx_path.read_text())
-            asset_grp = c.get("asset_group", "—")
-            cfg_set   = c.get("config_set", "")
-            proxy     = c.get("regime_proxy", "")
-        except Exception:
-            pass
-
-    src = d.name.replace("backtest_", "")
+    last_date = str(df.index[-1])[:10]
+    last_regime = str(df.iloc[-1, 0])
+    recent = " ".join(str(r)[:3] for r in df.iloc[-8:, 0].tolist())
     return (
-        f"{_header()}\n"
-        f"{cur_icon} <b>Régime: {cur['regime']}</b>  on <code>{asset_grp}</code>{_set_str(cfg_set)}{_proxy_str(proxy)}  depuis {cur['start'].strftime('%Y-%m-%d')}  ({cur_days}j)\n"
-        f"<i>Bars: {bar_freq}  ·  source: backtest {src}  ·  10 derniers segments :</i>\n"
-        f"<pre>{body}</pre>\n"
-        f"<i>{_now()}</i>"
+        f"<b>Regime: {last_regime}</b> {last_date} <code>{_HOST}</code>\n"
+        f"{_account_line()}\n"
+        f"Recent: <code>{recent}</code> - <i>{_now()}</i>"
     )
